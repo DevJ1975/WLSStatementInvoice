@@ -31,6 +31,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 button.secondary {
   border: 1px solid #c8d1d6;
   background: white;
@@ -476,6 +481,99 @@ h3 {
   gap: 16px;
 }
 
+.gps-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  padding: 18px;
+  background: white;
+  box-shadow: 0 10px 24px rgb(23 32 42 / 7%);
+}
+
+.gps-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.gps-metrics span,
+.route-strip span {
+  border: 1px solid #d8e0e4;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f8fafb;
+  color: #4b5a60;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.gps-metrics strong {
+  display: block;
+  color: #17202a;
+  font-size: 18px;
+}
+
+.gps-message {
+  margin: 0;
+}
+
+.gps-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mileage-table {
+  min-width: 1080px;
+}
+
+.sheet-table tr.selected td {
+  background: #fff9e7;
+}
+
+.table-input {
+  min-height: 34px;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.number-input {
+  min-width: 88px;
+}
+
+.route-map-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.route-map {
+  min-height: 360px;
+  overflow: hidden;
+  border: 1px solid #c8d1d6;
+  border-radius: 8px;
+  background: #eef2f4;
+}
+
+.route-empty {
+  margin: 0;
+}
+
+.route-pin-icon span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid white;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgb(23 32 42 / 25%);
+  color: white;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .summary-box {
   border: 1px solid #d8e0e4;
   border-radius: 8px;
@@ -581,6 +679,15 @@ h3 {
   .inline-fields:has(input:nth-child(3)),
   .inline-fields.compact {
     grid-template-columns: 1fr;
+  }
+
+  .gps-actions,
+  .gps-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .route-map {
+    min-height: 280px;
   }
 
   .statement-table {
