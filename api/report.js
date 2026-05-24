@@ -2,6 +2,7 @@ const { MongoClient, ServerApiVersion } = require('mongodb');
 
 const workspaceId = 'default';
 let cachedClient;
+let cachedClientPromise;
 
 function blankReportData() {
   return {
@@ -51,16 +52,30 @@ async function getClient() {
     throw new Error('Missing MONGODB_URI environment variable.');
   }
 
-  cachedClient = new MongoClient(process.env.MONGODB_URI, {
-    serverApi: {
-      version: ServerApiVersion.v1,
-      strict: true,
-      deprecationErrors: true,
-    },
-  });
+  if (!cachedClientPromise) {
+    const client = new MongoClient(process.env.MONGODB_URI, {
+      serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+      },
+      serverSelectionTimeoutMS: 10000,
+    });
 
-  await cachedClient.connect();
-  return cachedClient;
+    cachedClientPromise = client
+      .connect()
+      .then(() => {
+        cachedClient = client;
+        return client;
+      })
+      .catch((error) => {
+        cachedClient = undefined;
+        cachedClientPromise = undefined;
+        throw error;
+      });
+  }
+
+  return cachedClientPromise;
 }
 
 async function getCollection() {
@@ -120,6 +135,10 @@ module.exports = async function handler(req, res) {
     res.setHeader('Allow', 'GET, PUT');
     sendJson(res, 405, { error: 'Method not allowed.' });
   } catch (error) {
+    if (/topology is closed/i.test(error.message || '')) {
+      cachedClient = undefined;
+      cachedClientPromise = undefined;
+    }
     sendJson(res, 500, { error: error.message || 'Unexpected server error.' });
   }
 };
