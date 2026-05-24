@@ -7,3 +7,4 @@ dist/
 api/config.php
 .env.deploy
 .DS_Store
+.vercel
