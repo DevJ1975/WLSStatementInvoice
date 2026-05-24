@@ -1,25 +1,61 @@
 <script setup>
 import { computed, onMounted, reactive } from 'vue';
 
-const storageKey = 'wls-statement-invoice-fallback-v1';
+const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
 const tabs = [
+  ['archive', 'Archive'],
   ['statement', 'Statement'],
   ['expenses', 'Expense Report'],
   ['mileage', 'Mileage'],
   ['worklog', 'Work Log'],
-  ['receipts', 'Receipts'],
 ];
+const logoUrl = '/wls-logo.jpg';
 
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const number = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const mileageRate = new Intl.NumberFormat('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
+const state = reactive({
+  loading: true,
+  saving: false,
+  storage: 'loading',
+  error: '',
+  tab: 'archive',
+  projects: [],
+  currentProject: null,
+  receiptOcrRunning: false,
+  receiptUploading: false,
+  receiptDraft: emptyReceiptDraft(),
+});
+
+const expenseForm = reactive({ date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
+const mileageForm = reactive({ date: '', from: '', to: '', purpose: '', miles: '', rate: '0.725' });
+const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
+
+const data = computed(() => state.currentProject?.data || blankProjectData());
+const report = computed(() => data.value.report);
+const laborTotal = computed(() => Number(report.value.laborDays || 0) * Number(report.value.dailyRate || 0));
+const expenseTotal = computed(() => data.value.expenseRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
+const mileageTotal = computed(() => data.value.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0) * Number(row.rate || 0), 0));
+const totalMiles = computed(() => data.value.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0), 0));
+const totalDue = computed(() => laborTotal.value + expenseTotal.value + mileageTotal.value);
+const totalHours = computed(() => data.value.workLogs.reduce((sum, row) => sum + Number(row.hours || 0), 0));
+const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value / data.value.workLogs.length : 0));
+const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
+const workLogCategoryTotals = computed(() =>
+  data.value.workLogs.reduce((totals, row) => {
+    const key = row.taskCategory || 'Uncategorized';
+    totals[key] = (totals[key] || 0) + Number(row.hours || 0);
+    return totals;
+  }, {})
+);
+
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function defaultData() {
+function blankProjectData() {
   return {
     report: {
       employeeName: '',
@@ -44,38 +80,67 @@ function defaultData() {
   };
 }
 
-const state = reactive({
-  loading: true,
-  saving: false,
-  storage: 'loading',
-  error: '',
-  tab: 'statement',
-  data: defaultData(),
-});
+function blankProject(title = 'Untitled expense project') {
+  const now = new Date().toISOString();
+  return {
+    id: `local-${newId()}`,
+    title,
+    status: 'active',
+    data: blankProjectData(),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
-const expenseForm = reactive({ date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
-const mileageForm = reactive({ date: '', from: '', to: '', purpose: '', miles: '', rate: '0.725' });
-const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
-const receiptForm = reactive({ date: '', vendor: '', category: 'Hotel', amount: '', paymentMethod: '', notes: '' });
+function emptyReceiptDraft() {
+  return {
+    date: '',
+    vendor: '',
+    category: 'Misc.',
+    amount: '',
+    paymentMethod: '',
+    notes: '',
+    ocrText: '',
+    fileName: '',
+    imageBlob: null,
+    previewUrl: '',
+  };
+}
 
-const laborTotal = computed(() => Number(state.data.report.laborDays || 0) * Number(state.data.report.dailyRate || 0));
-const expenseTotal = computed(() => state.data.expenseRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
-const mileageTotal = computed(() => state.data.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0) * Number(row.rate || 0), 0));
-const totalMiles = computed(() => state.data.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0), 0));
-const totalDue = computed(() => laborTotal.value + expenseTotal.value + mileageTotal.value);
-const receiptTotal = computed(() => state.data.receipts.reduce((sum, row) => sum + Number(row.amount || 0), 0));
-const totalHours = computed(() => state.data.workLogs.reduce((sum, row) => sum + Number(row.hours || 0), 0));
-const avgHours = computed(() => (state.data.workLogs.length ? totalHours.value / state.data.workLogs.length : 0));
+function normalizeProjectData(sourceData) {
+  const blank = blankProjectData();
+  const source = sourceData && typeof sourceData === 'object' ? sourceData : {};
+  return {
+    report: { ...blank.report, ...(source.report || {}) },
+    expenseRows: Array.isArray(source.expenseRows) ? source.expenseRows : [],
+    mileageRows: Array.isArray(source.mileageRows) ? source.mileageRows : [],
+    workLogs: Array.isArray(source.workLogs) ? source.workLogs : [],
+    receipts: Array.isArray(source.receipts) ? source.receipts : [],
+  };
+}
 
-const expenseCategoryTotals = computed(() => categoryTotals(state.data.expenseRows));
-const receiptCategoryTotals = computed(() => categoryTotals(state.data.receipts));
-const workLogCategoryTotals = computed(() =>
-  state.data.workLogs.reduce((totals, row) => {
-    const key = row.taskCategory || 'Uncategorized';
-    totals[key] = (totals[key] || 0) + Number(row.hours || 0);
-    return totals;
-  }, {})
-);
+function normalizeProject(project) {
+  const fallback = blankProject();
+  return {
+    ...fallback,
+    ...project,
+    id: project?.id || project?._id || fallback.id,
+    title: project?.title || fallback.title,
+    status: project?.status || 'active',
+    data: normalizeProjectData(project?.data),
+  };
+}
+
+function projectTitle(project = state.currentProject) {
+  if (!project) return 'Untitled expense project';
+  const projectReport = project.data?.report || {};
+  const pieces = [
+    projectReport.reportNo ? `Report ${projectReport.reportNo}` : '',
+    projectReport.employeeName || projectReport.engagement || '',
+    projectReport.periodFrom && projectReport.periodTo ? `${projectReport.periodFrom} to ${projectReport.periodTo}` : '',
+  ].filter(Boolean);
+  return project.title || pieces.join(' - ') || 'Untitled expense project';
+}
 
 function categoryTotals(rows) {
   return categories.reduce((totals, category) => {
@@ -86,81 +151,122 @@ function categoryTotals(rows) {
   }, {});
 }
 
-function loadData() {
-  const raw = localStorage.getItem(storageKey);
-  if (!raw) return defaultData();
-
+function loadLocalArchive() {
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed.report || !Array.isArray(parsed.expenseRows)) return defaultData();
-    return parsed;
+    const parsed = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
+    const projects = Array.isArray(parsed.projects) ? parsed.projects.map(normalizeProject) : [];
+    return { projects, currentProjectId: parsed.currentProjectId || projects[0]?.id || '' };
   } catch {
-    return defaultData();
+    return { projects: [], currentProjectId: '' };
   }
 }
 
-function normalizeData(data) {
-  const blank = defaultData();
-  const source = data && typeof data === 'object' ? data : {};
-  const report = source.report && typeof source.report === 'object' ? source.report : {};
-
-  return {
-    report: { ...blank.report, ...report },
-    expenseRows: Array.isArray(source.expenseRows) ? source.expenseRows : [],
-    mileageRows: Array.isArray(source.mileageRows) ? source.mileageRows : [],
-    workLogs: Array.isArray(source.workLogs) ? source.workLogs : [],
-    receipts: Array.isArray(source.receipts) ? source.receipts : [],
-  };
+function saveLocalArchive() {
+  localStorage.setItem(
+    archiveStorageKey,
+    JSON.stringify({
+      projects: state.projects,
+      currentProjectId: state.currentProject?.id || '',
+    })
+  );
 }
 
-function saveLocalFallback() {
-  localStorage.setItem(storageKey, JSON.stringify(state.data));
+async function apiJson(path, options = {}) {
+  const response = await fetch(path, {
+    headers: {
+      Accept: 'application/json',
+      ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || 'API request failed.');
+  }
+  return payload;
 }
 
-async function fetchData() {
+async function loadProjects() {
   state.loading = true;
   state.error = '';
 
   try {
-    const response = await fetch('/api/report', { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      throw new Error('MongoDB API is unavailable.');
-    }
-
-    const payload = await response.json();
-    state.data = normalizeData(payload.data);
+    const payload = await apiJson('/api/projects');
+    state.projects = payload.projects.map(normalizeProject);
     state.storage = 'mongodb';
-    saveLocalFallback();
-  } catch (error) {
-    state.data = normalizeData(loadData());
+
+    if (!state.projects.length) {
+      await createProject('Untitled expense project');
+    } else {
+      await openProject(state.projects[0].id);
+    }
+  } catch {
+    const archive = loadLocalArchive();
+    state.projects = archive.projects.length ? archive.projects : [blankProject()];
+    state.currentProject = state.projects.find((project) => project.id === archive.currentProjectId) || state.projects[0];
     state.storage = 'local';
     state.error = 'Using local fallback. MongoDB sync is unavailable in this session.';
+    saveLocalArchive();
   } finally {
     state.loading = false;
   }
 }
 
-async function saveData() {
-  saveLocalFallback();
+async function createProject(title = 'Untitled expense project') {
+  if (state.storage === 'mongodb') {
+    const payload = await apiJson('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    });
+    state.projects = [normalizeProject(payload.project), ...state.projects];
+    await openProject(payload.project.id);
+    return;
+  }
+
+  const project = blankProject(title);
+  state.projects.unshift(project);
+  state.currentProject = project;
+  saveLocalArchive();
+}
+
+async function openProject(id) {
+  if (state.storage === 'mongodb') {
+    const payload = await apiJson(`/api/projects/${id}`);
+    state.currentProject = normalizeProject(payload.project);
+    const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
+    if (index >= 0) state.projects[index] = { ...state.projects[index], ...state.currentProject };
+    saveLocalArchive();
+    return;
+  }
+
+  state.currentProject = state.projects.find((project) => project.id === id) || state.projects[0];
+  saveLocalArchive();
+}
+
+async function saveCurrentProject() {
+  if (!state.currentProject) return;
+  state.currentProject.title = projectTitle();
+  state.currentProject.updatedAt = new Date().toISOString();
+  const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
+  if (index >= 0) state.projects[index] = state.currentProject;
+  saveLocalArchive();
+
+  if (state.storage !== 'mongodb') return;
 
   try {
     state.saving = true;
-    const response = await fetch('/api/report', {
+    const payload = await apiJson(`/api/projects/${state.currentProject.id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: state.data }),
+      body: JSON.stringify({
+        title: state.currentProject.title,
+        data: state.currentProject.data,
+      }),
     });
-
-    if (!response.ok) {
-      throw new Error('MongoDB API save failed.');
-    }
-
-    const payload = await response.json();
-    state.data = normalizeData(payload.data);
-    state.storage = 'mongodb';
+    state.currentProject = normalizeProject(payload.project);
     state.error = '';
-    saveLocalFallback();
-  } catch (error) {
+    saveLocalArchive();
+  } catch {
     state.storage = 'local';
     state.error = 'Saved locally only. MongoDB sync is unavailable in this session.';
   } finally {
@@ -168,13 +274,47 @@ async function saveData() {
   }
 }
 
+async function patchProject(project, patch) {
+  if (state.storage === 'mongodb' && !project.id.startsWith('local-')) {
+    const payload = await apiJson(`/api/projects/${project.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    const updated = normalizeProject({ ...project, ...payload.project });
+    const index = state.projects.findIndex((item) => item.id === project.id);
+    if (index >= 0) state.projects[index] = updated;
+    if (state.currentProject?.id === project.id) state.currentProject = { ...state.currentProject, ...updated };
+    saveLocalArchive();
+    return;
+  }
+
+  Object.assign(project, patch, { updatedAt: new Date().toISOString() });
+  saveLocalArchive();
+}
+
+async function renameProject(project) {
+  const title = window.prompt('Project name', project.title || projectTitle(project));
+  if (!title) return;
+  await patchProject(project, { title });
+}
+
+async function archiveProject(project) {
+  await patchProject(project, { status: 'archived' });
+}
+
+async function restoreProject(project) {
+  await patchProject(project, { status: 'active' });
+}
+
 async function resetToBlankTemplate() {
-  state.data = defaultData();
-  await saveData();
+  if (!state.currentProject) return;
+  state.currentProject.data = blankProjectData();
+  state.currentProject.title = 'Untitled expense project';
+  await saveCurrentProject();
 }
 
 async function addExpense() {
-  state.data.expenseRows.push({
+  data.value.expenseRows.push({
     id: newId(),
     date: expenseForm.date,
     vendor: expenseForm.vendor.trim(),
@@ -183,11 +323,11 @@ async function addExpense() {
     amount: Number(expenseForm.amount || 0),
   });
   Object.assign(expenseForm, { date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
-  await saveData();
+  await saveCurrentProject();
 }
 
 async function addMileage() {
-  state.data.mileageRows.push({
+  data.value.mileageRows.push({
     id: newId(),
     date: mileageForm.date,
     from: mileageForm.from.trim(),
@@ -197,11 +337,11 @@ async function addMileage() {
     rate: Number(mileageForm.rate || 0),
   });
   Object.assign(mileageForm, { date: '', from: '', to: '', purpose: '', miles: '', rate: '0.725' });
-  await saveData();
+  await saveCurrentProject();
 }
 
 async function addWorkLog() {
-  state.data.workLogs.push({
+  data.value.workLogs.push({
     id: newId(),
     date: workLogForm.date,
     clientSite: workLogForm.clientSite.trim(),
@@ -213,50 +353,315 @@ async function addWorkLog() {
     status: workLogForm.status.trim(),
   });
   Object.assign(workLogForm, { date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
-  await saveData();
-}
-
-async function addReceipt() {
-  state.data.receipts.push({
-    id: newId(),
-    date: receiptForm.date,
-    vendor: receiptForm.vendor.trim(),
-    category: receiptForm.category,
-    amount: Number(receiptForm.amount || 0),
-    paymentMethod: receiptForm.paymentMethod.trim(),
-    notes: receiptForm.notes.trim(),
-  });
-  Object.assign(receiptForm, { date: '', vendor: '', category: 'Hotel', amount: '', paymentMethod: '', notes: '' });
-  await saveData();
+  await saveCurrentProject();
 }
 
 async function removeRow(collection, id) {
-  state.data[collection] = state.data[collection].filter((row) => row.id !== id);
-  await saveData();
+  data.value[collection] = data.value[collection].filter((row) => row.id !== id);
+  if (collection === 'expenseRows') {
+    data.value.receipts = data.value.receipts.filter((receipt) => receipt.expenseId !== id);
+  }
+  await saveCurrentProject();
 }
 
 function hasMileageForDate(date) {
-  return state.data.mileageRows.some((row) => row.date === date);
+  return data.value.mileageRows.some((row) => row.date === date);
 }
 
 function formatPeriod() {
-  const report = state.data.report;
-  return `${report.periodFrom || ''} - ${report.periodTo || ''}`;
+  return `${report.value.periodFrom || ''} - ${report.value.periodTo || ''}`;
 }
 
-onMounted(fetchData);
+async function handleReceiptFile(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  state.receiptDraft = emptyReceiptDraft();
+  state.receiptDraft.fileName = file.name;
+  state.receiptOcrRunning = true;
+
+  try {
+    const image = await compressImage(file);
+    state.receiptDraft.imageBlob = image.blob;
+    state.receiptDraft.previewUrl = image.previewUrl;
+
+    const { createWorker } = await import('tesseract.js');
+    const worker = await createWorker('eng');
+    const result = await worker.recognize(image.blob);
+    await worker.terminate();
+
+    const parsed = parseReceiptText(result.data.text || '');
+    state.receiptDraft = {
+      ...state.receiptDraft,
+      ...parsed,
+      ocrText: result.data.text || '',
+    };
+  } catch (error) {
+    state.error = `Receipt OCR failed: ${error.message}`;
+  } finally {
+    state.receiptOcrRunning = false;
+    event.target.value = '';
+  }
+}
+
+function parseReceiptText(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const amountMatches = [...text.matchAll(/\$?\s?(\d+\.\d{2})/g)].map((match) => Number(match[1]));
+  const dateMatch = text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b/);
+  const amount = amountMatches.length ? Math.max(...amountMatches).toFixed(2) : '';
+
+  return {
+    vendor: lines[0] || '',
+    date: dateMatch ? normalizeDate(dateMatch[1]) : '',
+    amount,
+    category: guessCategory(text),
+    notes: lines.slice(1, 4).join(' '),
+  };
+}
+
+function normalizeDate(value) {
+  const normalized = value.replaceAll('-', '/');
+  const parts = normalized.split('/');
+  if (parts[0]?.length === 4) {
+    return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+  }
+  const year = parts[2]?.length === 2 ? `20${parts[2]}` : parts[2];
+  return year ? `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}` : '';
+}
+
+function guessCategory(text) {
+  const value = text.toLowerCase();
+  if (/hotel|inn|suite|lodging/.test(value)) return 'Hotel';
+  if (/gas|fuel|shell|chevron|76 /.test(value)) return 'Fuel';
+  if (/restaurant|coffee|diner|mcdonald|meal|food|denny/.test(value)) return 'Meals';
+  if (/uber|lyft|taxi|parking|transport/.test(value)) return 'Transport';
+  if (/phone|mobile|wireless/.test(value)) return 'Phone';
+  return 'Misc.';
+}
+
+async function compressImage(file) {
+  const dataUrl = await fileToDataUrl(file);
+  const image = await loadImage(dataUrl);
+  const canvas = document.createElement('canvas');
+  const maxWidth = 1400;
+  const scale = Math.min(1, maxWidth / image.width);
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+  return {
+    blob,
+    previewUrl: URL.createObjectURL(blob),
+  };
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+async function saveReceiptDraft() {
+  if (!state.receiptDraft.imageBlob || !state.currentProject) return;
+  state.receiptUploading = true;
+
+  try {
+    if (state.storage === 'mongodb' && !state.currentProject.id.startsWith('local-')) {
+      const formData = new FormData();
+      formData.append('receipt', state.receiptDraft.imageBlob, state.receiptDraft.fileName || 'receipt.jpg');
+      formData.append(
+        'metadata',
+        JSON.stringify({
+          date: state.receiptDraft.date,
+          vendor: state.receiptDraft.vendor,
+          category: state.receiptDraft.category,
+          amount: state.receiptDraft.amount,
+          paymentMethod: state.receiptDraft.paymentMethod,
+          notes: state.receiptDraft.notes,
+          ocrText: state.receiptDraft.ocrText,
+        })
+      );
+      const response = await fetch(`/api/projects/${state.currentProject.id}/receipts`, {
+        method: 'POST',
+        body: formData,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Receipt upload failed.');
+      state.currentProject = normalizeProject(payload.project);
+    } else {
+      const receiptId = newId();
+      const expenseId = newId();
+      const imageDataUrl = await blobToDataUrl(state.receiptDraft.imageBlob);
+      data.value.receipts.push({
+        id: receiptId,
+        expenseId,
+        date: state.receiptDraft.date,
+        vendor: state.receiptDraft.vendor,
+        category: state.receiptDraft.category,
+        amount: Number(state.receiptDraft.amount || 0),
+        paymentMethod: state.receiptDraft.paymentMethod,
+        notes: state.receiptDraft.notes,
+        ocrText: state.receiptDraft.ocrText,
+        imageDataUrl,
+        createdAt: new Date().toISOString(),
+      });
+      data.value.expenseRows.push({
+        id: expenseId,
+        date: state.receiptDraft.date,
+        vendor: state.receiptDraft.vendor,
+        description: state.receiptDraft.notes || 'Receipt expense',
+        category: state.receiptDraft.category,
+        amount: Number(state.receiptDraft.amount || 0),
+        receiptId,
+      });
+      await saveCurrentProject();
+    }
+
+    state.receiptDraft = emptyReceiptDraft();
+  } catch (error) {
+    state.error = error.message;
+  } finally {
+    state.receiptUploading = false;
+  }
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function imageToDataUrl(path) {
+  const response = await fetch(path);
+  const blob = await response.blob();
+  return blobToDataUrl(blob);
+}
+
+function receiptImageUrl(receipt) {
+  if (receipt.imageDataUrl) return receipt.imageDataUrl;
+  if (!state.currentProject || !receipt.imageFileId) return '';
+  return `/api/projects/${state.currentProject.id}/receipts/${receipt.id}/image`;
+}
+
+async function exportPdf(includeReceipts = false) {
+  const { jsPDF } = await import('jspdf');
+  const autoTableModule = await import('jspdf-autotable');
+  const autoTable = autoTableModule.default;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  const logo = await imageToDataUrl(logoUrl).catch(() => '');
+
+  addPdfHeader(doc, logo, 'Expense Statement');
+  doc.setFontSize(10);
+  doc.text(projectTitle(), 42, 74);
+  autoTable(doc, {
+    startY: 92,
+    head: [['Date', 'Description', '# of Days', 'Daily Rate', 'Total']],
+    body: [
+      [formatPeriod(), report.value.laborDescription, report.value.laborDays, money.format(Number(report.value.dailyRate || 0)), money.format(laborTotal.value)],
+      ['', 'Expenses', '', '', money.format(expenseTotal.value)],
+      ['', `Mileage (${number.format(totalMiles.value)} mi)`, '', '', money.format(mileageTotal.value)],
+      ['', 'Total expenses', '', '', money.format(expenseTotal.value + mileageTotal.value)],
+      ['', '', '', 'TOTAL DUE', money.format(totalDue.value)],
+    ],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+  });
+
+  doc.addPage('letter', 'landscape');
+  addPdfHeader(doc, logo, 'Expense Report');
+  autoTable(doc, {
+    startY: 82,
+    head: [['Date', 'Vendor', 'Description', 'Category', 'Amount']],
+    body: data.value.expenseRows.map((row) => [row.date, row.vendor, row.description, row.category, money.format(Number(row.amount || 0))]),
+    foot: [['', '', '', 'Total', money.format(expenseTotal.value)]],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+  });
+
+  doc.addPage('letter', 'landscape');
+  addPdfHeader(doc, logo, 'Work Log');
+  autoTable(doc, {
+    startY: 82,
+    head: [['Date', 'Client / Site', 'Location', 'Task Category', 'Hours', 'Summary', 'Actions']],
+    body: data.value.workLogs.map((row) => [row.date, row.clientSite, row.location, row.taskCategory, row.hours, row.summary, row.actions]),
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+    styles: { fontSize: 8, cellWidth: 'wrap' },
+  });
+
+  doc.addPage('letter', 'landscape');
+  addPdfHeader(doc, logo, 'Mileage Report');
+  autoTable(doc, {
+    startY: 82,
+    head: [['Date', 'From', 'To', 'Purpose', 'Miles', '$ Per Mile', 'Total']],
+    body: data.value.mileageRows.map((row) => [row.date, row.from, row.to, row.purpose, number.format(row.miles), `$${mileageRate.format(row.rate)}`, money.format(row.miles * row.rate)]),
+    foot: [['', '', '', 'Totals', number.format(totalMiles.value), '', money.format(mileageTotal.value)]],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+  });
+
+  if (includeReceipts) {
+    for (const receipt of data.value.receipts) {
+      doc.addPage('letter', 'portrait');
+      addPdfHeader(doc, logo, 'Receipt Appendix');
+      doc.setFontSize(10);
+      doc.text(`${receipt.vendor || 'Receipt'} - ${money.format(Number(receipt.amount || 0))}`, 42, 82);
+      const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
+      if (src) {
+        doc.addImage(src, 'JPEG', 42, 104, 500, 610, undefined, 'FAST');
+      }
+    }
+  }
+
+  doc.save(`${projectTitle().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'expense-report'}.pdf`);
+}
+
+function addPdfHeader(doc, logo, title) {
+  if (logo) doc.addImage(logo, 'JPEG', 42, 24, 135, 49, undefined, 'FAST');
+  doc.setFontSize(18);
+  doc.setTextColor(75, 90, 96);
+  doc.text(title, 720, 52, { align: 'right' });
+  doc.setDrawColor(216, 224, 228);
+  doc.line(42, 66, 750, 66);
+}
+
+onMounted(loadProjects);
 </script>
 
 <template>
   <main>
     <header class="app-header">
-      <div>
-        <p class="eyebrow">Workplace Learning System</p>
-        <h1>Expense Statement</h1>
+      <div class="brand-lockup">
+        <img :src="logoUrl" alt="Workplace Learning System" />
+        <div>
+          <p class="eyebrow">Workplace Learning System</p>
+          <h1>{{ state.currentProject ? projectTitle() : 'Expense Statement' }}</h1>
+        </div>
       </div>
       <div class="header-actions">
         <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB sync' : 'Local fallback' }}</span>
         <span v-if="state.saving" class="mode-pill">Saving...</span>
+        <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
+        <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
         <button class="secondary" type="button" @click="resetToBlankTemplate">Reset blank</button>
       </div>
     </header>
@@ -276,98 +681,133 @@ onMounted(fetchData);
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
     <p v-if="state.loading" class="loading">Loading...</p>
 
-    <section v-else-if="state.tab === 'statement'" class="statement-grid">
-      <form class="report-form" @change="saveData" @submit.prevent="saveData">
+    <section v-else-if="state.tab === 'archive'" class="archive-view">
+      <div class="archive-toolbar">
+        <h2>Project archive</h2>
+        <button type="button" @click="createProject()">New project</button>
+      </div>
+      <div class="archive-list">
+        <article v-for="project in state.projects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
+          <div>
+            <h3>{{ projectTitle(project) }}</h3>
+            <p>{{ project.status }} <span v-if="project.periodFrom">| {{ project.periodFrom }} to {{ project.periodTo }}</span></p>
+          </div>
+          <button class="secondary" type="button" @click="openProject(project.id)">Open</button>
+          <button class="secondary" type="button" @click="renameProject(project)">Rename</button>
+          <button v-if="project.status !== 'archived'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
+          <button v-else class="secondary" type="button" @click="restoreProject(project)">Restore</button>
+        </article>
+      </div>
+    </section>
+
+    <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
+      <form class="report-form" @change="saveCurrentProject" @submit.prevent="saveCurrentProject">
         <h2>Report details</h2>
-        <input v-model="state.data.report.employeeName" placeholder="Employee name" />
-        <input v-model="state.data.report.address" placeholder="Address" />
+        <input v-model="report.employeeName" placeholder="Employee name" />
+        <input v-model="report.address" placeholder="Address" />
         <div class="inline-fields">
-          <input v-model="state.data.report.employeeId" placeholder="Employee ID" />
-          <input v-model="state.data.report.reportNo" placeholder="Report no." />
+          <input v-model="report.employeeId" placeholder="Employee ID" />
+          <input v-model="report.reportNo" placeholder="Report no." />
         </div>
         <div class="inline-fields">
-          <input v-model="state.data.report.phone" placeholder="Phone" />
-          <input v-model="state.data.report.email" type="email" placeholder="Email" />
+          <input v-model="report.phone" placeholder="Phone" />
+          <input v-model="report.email" type="email" placeholder="Email" />
         </div>
         <div class="inline-fields">
-          <input v-model="state.data.report.periodFrom" type="date" />
-          <input v-model="state.data.report.periodTo" type="date" />
-          <input v-model="state.data.report.reportDate" type="date" />
+          <input v-model="report.periodFrom" type="date" />
+          <input v-model="report.periodTo" type="date" />
+          <input v-model="report.reportDate" type="date" />
         </div>
-        <input v-model="state.data.report.engagement" placeholder="Engagement" />
-        <input v-model="state.data.report.laborTitle" placeholder="Labor title" />
-        <input v-model="state.data.report.laborDescription" placeholder="Labor description" />
+        <input v-model="report.engagement" placeholder="Engagement" />
+        <input v-model="report.laborTitle" placeholder="Labor title" />
+        <input v-model="report.laborDescription" placeholder="Labor description" />
         <div class="inline-fields compact">
-          <input v-model.number="state.data.report.laborDays" type="number" min="0" step="0.5" placeholder="Days" />
-          <input v-model.number="state.data.report.dailyRate" type="number" min="0" step="0.01" placeholder="Daily rate" />
+          <input v-model.number="report.laborDays" type="number" min="0" step="0.5" placeholder="Days" />
+          <input v-model.number="report.dailyRate" type="number" min="0" step="0.01" placeholder="Daily rate" />
         </div>
         <button type="submit">Save details</button>
       </form>
 
       <div class="statement-sheet">
         <div class="sheet-topline">
-          <span>Making the world a safer place</span>
+          <img class="sheet-logo" :src="logoUrl" alt="Workplace Learning System" />
           <strong>Expense Statement</strong>
         </div>
         <div class="statement-meta">
           <div>
-            <strong>{{ state.data.report.employeeName }}</strong>
-            <span>{{ state.data.report.address }}</span>
-            <span>{{ state.data.report.employeeId }}</span>
-            <span>{{ state.data.report.phone }}</span>
-            <span>{{ state.data.report.email }}</span>
+            <strong>{{ report.employeeName }}</strong>
+            <span>{{ report.address }}</span>
+            <span>{{ report.employeeId }}</span>
+            <span>{{ report.phone }}</span>
+            <span>{{ report.email }}</span>
           </div>
           <dl>
-            <dt>EXP. REPORT NO.</dt><dd>{{ state.data.report.reportNo }}</dd>
-            <dt>DATE</dt><dd>{{ state.data.report.reportDate }}</dd>
-            <dt>EMPLOYEE ID</dt><dd>{{ state.data.report.employeeId }}</dd>
+            <dt>EXP. REPORT NO.</dt><dd>{{ report.reportNo }}</dd>
+            <dt>DATE</dt><dd>{{ report.reportDate }}</dd>
+            <dt>EMPLOYEE ID</dt><dd>{{ report.employeeId }}</dd>
             <dt>PERIOD</dt><dd>{{ formatPeriod() }}</dd>
           </dl>
         </div>
-        <div class="engagement-band">{{ state.data.report.engagement }}</div>
-        <div class="labor-band">{{ state.data.report.laborTitle }}</div>
+        <div class="engagement-band">{{ report.engagement }}</div>
+        <div class="labor-band">{{ report.laborTitle }}</div>
         <table class="sheet-table statement-table">
-          <thead>
-            <tr><th>Date</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr>
-          </thead>
+          <thead><tr><th>Date</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr></thead>
           <tbody>
             <tr>
               <td>{{ formatPeriod() }}</td>
-              <td>{{ state.data.report.laborDescription }}</td>
-              <td>{{ state.data.report.laborDays }}</td>
-              <td>{{ money.format(Number(state.data.report.dailyRate || 0)) }}</td>
+              <td>{{ report.laborDescription }}</td>
+              <td>{{ report.laborDays }}</td>
+              <td>{{ money.format(Number(report.dailyRate || 0)) }}</td>
               <td>{{ money.format(laborTotal) }}</td>
             </tr>
-            <tr><td></td><td>Expenses (receipts - hotel, meals)</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
+            <tr><td></td><td>Expenses</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
             <tr><td></td><td>Mileage ({{ number.format(totalMiles) }} mi)</td><td></td><td></td><td>{{ money.format(mileageTotal) }}</td></tr>
-            <tr><td></td><td>Total expenses (receipts + mileage)</td><td></td><td></td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr>
+            <tr><td></td><td>Total expenses</td><td></td><td></td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr>
           </tbody>
-          <tfoot>
-            <tr><td colspan="4">TOTAL DUE</td><td>{{ money.format(totalDue) }}</td></tr>
-          </tfoot>
+          <tfoot><tr><td colspan="4">TOTAL DUE</td><td>{{ money.format(totalDue) }}</td></tr></tfoot>
         </table>
       </div>
     </section>
 
-    <section v-else-if="state.tab === 'expenses'" class="workbook-view">
-      <form @submit.prevent="addExpense">
-        <h2>Add expense line</h2>
-        <input v-model="expenseForm.date" type="date" required />
-        <input v-model="expenseForm.vendor" placeholder="Vendor" required />
-        <input v-model="expenseForm.description" placeholder="Description" required />
-        <select v-model="expenseForm.category">
-          <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
-        </select>
-        <input v-model="expenseForm.amount" type="number" min="0" step="0.01" placeholder="Amount" required />
-        <button type="submit">Add expense</button>
-      </form>
+    <section v-else-if="state.currentProject && state.tab === 'expenses'" class="workbook-view">
+      <div class="form-stack">
+        <form @submit.prevent="addExpense">
+          <h2>Add expense line</h2>
+          <input v-model="expenseForm.date" type="date" required />
+          <input v-model="expenseForm.vendor" placeholder="Vendor" required />
+          <input v-model="expenseForm.description" placeholder="Description" required />
+          <select v-model="expenseForm.category">
+            <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
+          </select>
+          <input v-model="expenseForm.amount" type="number" min="0" step="0.01" placeholder="Amount" required />
+          <button type="submit">Add expense</button>
+        </form>
+
+        <form class="receipt-capture" @submit.prevent="saveReceiptDraft">
+          <h2>Receipt OCR</h2>
+          <input type="file" accept="image/*" capture="environment" @change="handleReceiptFile" />
+          <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
+          <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
+          <input v-model="state.receiptDraft.vendor" placeholder="Vendor" />
+          <input v-model="state.receiptDraft.date" type="date" />
+          <select v-model="state.receiptDraft.category">
+            <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
+          </select>
+          <input v-model="state.receiptDraft.amount" type="number" min="0" step="0.01" placeholder="Amount" />
+          <input v-model="state.receiptDraft.paymentMethod" placeholder="Payment method" />
+          <textarea v-model="state.receiptDraft.notes" placeholder="Notes"></textarea>
+          <button type="submit" :disabled="!state.receiptDraft.imageBlob || state.receiptUploading">
+            {{ state.receiptUploading ? 'Saving receipt...' : 'Save receipt and expense' }}
+          </button>
+        </form>
+      </div>
 
       <div class="sheet-panel">
         <div class="sheet-title-row"><span>Expense period</span><strong>Expense Report</strong></div>
         <div class="period-row">
-          <span>From {{ state.data.report.periodFrom }}</span>
-          <span>To {{ state.data.report.periodTo }}</span>
-          <span>Report No. {{ state.data.report.reportNo }}</span>
+          <span>From {{ report.periodFrom }}</span>
+          <span>To {{ report.periodTo }}</span>
+          <span>Report No. {{ report.reportNo }}</span>
         </div>
         <div class="table-scroll">
           <table class="sheet-table wide-table">
@@ -379,7 +819,7 @@ onMounted(fetchData);
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in state.data.expenseRows" :key="row.id">
+              <tr v-for="row in data.expenseRows" :key="row.id">
                 <td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td>
                 <td v-for="category in categories" :key="category">{{ row.category === category ? money.format(row.amount) : '' }}</td>
                 <td>{{ money.format(row.amount) }}</td>
@@ -397,10 +837,20 @@ onMounted(fetchData);
             </tfoot>
           </table>
         </div>
+
+        <div class="receipt-grid">
+          <article v-for="receipt in data.receipts" :key="receipt.id">
+            <img v-if="receiptImageUrl(receipt)" :src="receiptImageUrl(receipt)" :alt="receipt.vendor || 'Receipt'" />
+            <div>
+              <h3>{{ receipt.vendor || 'Receipt' }}</h3>
+              <p>{{ receipt.date }} | {{ receipt.category }} | {{ money.format(receipt.amount || 0) }}</p>
+            </div>
+          </article>
+        </div>
       </div>
     </section>
 
-    <section v-else-if="state.tab === 'mileage'" class="workbook-view">
+    <section v-else-if="state.currentProject && state.tab === 'mileage'" class="workbook-view">
       <form @submit.prevent="addMileage">
         <h2>Add mileage</h2>
         <input v-model="mileageForm.date" type="date" required />
@@ -419,7 +869,7 @@ onMounted(fetchData);
           <table class="sheet-table">
             <thead><tr><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="row in state.data.mileageRows" :key="row.id">
+              <tr v-for="row in data.mileageRows" :key="row.id">
                 <td>{{ row.date }}</td><td>{{ row.from }}</td><td>{{ row.to }}</td><td>{{ row.purpose }}</td>
                 <td>{{ number.format(row.miles) }}</td><td>${{ mileageRate.format(row.rate) }}</td><td>{{ money.format(row.miles * row.rate) }}</td>
                 <td><button class="icon" type="button" @click="removeRow('mileageRows', row.id)">Delete</button></td>
@@ -431,13 +881,13 @@ onMounted(fetchData);
         <aside class="summary-box">
           <h3>Trip Summary</h3>
           <p><span>Total Miles</span><strong>{{ number.format(totalMiles) }}</strong></p>
-          <p><span>IRS Rate</span><strong>${{ mileageRate.format(state.data.mileageRows[0]?.rate || 0) }}</strong></p>
+          <p><span>IRS Rate</span><strong>${{ mileageRate.format(data.mileageRows[0]?.rate || 0) }}</strong></p>
           <p><span>Total Reimbursement</span><strong>{{ money.format(mileageTotal) }}</strong></p>
         </aside>
       </div>
     </section>
 
-    <section v-else-if="state.tab === 'worklog'" class="workbook-view">
+    <section v-else-if="state.currentProject && state.tab === 'worklog'" class="workbook-view">
       <form @submit.prevent="addWorkLog">
         <h2>Add work log</h2>
         <input v-model="workLogForm.date" type="date" required />
@@ -456,7 +906,7 @@ onMounted(fetchData);
           <table class="sheet-table wide-table">
             <thead><tr><th>#</th><th>Date</th><th>Client / Site</th><th>Location</th><th>Task Category</th><th>Hours</th><th>Work Summary</th><th>Key Findings / Actions</th><th>Status</th><th>Mileage</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="(row, index) in state.data.workLogs" :key="row.id">
+              <tr v-for="(row, index) in data.workLogs" :key="row.id">
                 <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.clientSite }}</td><td>{{ row.location }}</td><td>{{ row.taskCategory }}</td><td>{{ row.hours }}</td><td>{{ row.summary }}</td><td>{{ row.actions }}</td><td>{{ row.status }}</td><td>{{ hasMileageForDate(row.date) ? 'Yes' : 'Missing' }}</td>
                 <td><button class="icon" type="button" @click="removeRow('workLogs', row.id)">Delete</button></td>
               </tr>
@@ -464,49 +914,12 @@ onMounted(fetchData);
           </table>
         </div>
         <div class="summary-strip">
-          <span>Total Entries <strong>{{ state.data.workLogs.length }}</strong></span>
+          <span>Total Entries <strong>{{ data.workLogs.length }}</strong></span>
           <span>Total Hours <strong>{{ number.format(totalHours) }}</strong></span>
           <span>Avg Hours/Day <strong>{{ number.format(avgHours) }}</strong></span>
         </div>
         <div class="mini-summary">
           <p v-for="(hours, category) in workLogCategoryTotals" :key="category"><span>{{ category }}</span><strong>{{ number.format(hours) }}</strong></p>
-        </div>
-      </div>
-    </section>
-
-    <section v-else-if="state.tab === 'receipts'" class="workbook-view">
-      <form @submit.prevent="addReceipt">
-        <h2>Add receipt</h2>
-        <input v-model="receiptForm.date" type="date" required />
-        <input v-model="receiptForm.vendor" placeholder="Vendor / Merchant" required />
-        <select v-model="receiptForm.category">
-          <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
-        </select>
-        <input v-model="receiptForm.amount" type="number" min="0" step="0.01" placeholder="Amount" required />
-        <input v-model="receiptForm.paymentMethod" placeholder="Payment method" />
-        <textarea v-model="receiptForm.notes" placeholder="Notes"></textarea>
-        <button type="submit">Add receipt</button>
-      </form>
-
-      <div class="sheet-panel">
-        <div class="sheet-title-row"><strong>Receipt Tracker</strong></div>
-        <div class="table-scroll">
-          <table class="sheet-table wide-table">
-            <thead><tr><th>#</th><th>Date</th><th>Vendor / Merchant</th><th>Category</th><th>Amount</th><th>Payment Method</th><th>Notes</th><th>Receipt Image</th><th></th></tr></thead>
-            <tbody>
-              <tr v-for="(row, index) in state.data.receipts" :key="row.id">
-                <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.category }}</td><td>{{ money.format(row.amount) }}</td><td>{{ row.paymentMethod }}</td><td>{{ row.notes }}</td><td></td>
-                <td><button class="icon" type="button" @click="removeRow('receipts', row.id)">Delete</button></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="summary-strip">
-          <span>Total Receipts <strong>{{ state.data.receipts.length }}</strong></span>
-          <span>Total Amount <strong>{{ money.format(receiptTotal) }}</strong></span>
-        </div>
-        <div class="mini-summary">
-          <p v-for="category in categories" :key="category"><span>{{ category }}</span><strong>{{ money.format(receiptCategoryTotals[category]) }}</strong></p>
         </div>
       </div>
     </section>
