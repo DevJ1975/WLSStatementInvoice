@@ -2873,28 +2873,31 @@ async function addReceiptAppendix(doc, logo) {
   const receipts = data.value.receipts;
   if (!receipts.length) return;
 
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
   const gap = 12;
-  const tableTop = pdfTableStartY;
-  const tableBottom = pageHeight - 54;
-  const cellWidth = (pageWidth - pdfMargin * 2 - gap) / 2;
-  const cellHeight = (tableBottom - tableTop - gap) / 2;
+  let layout = null;
 
   for (let index = 0; index < receipts.length; index += 1) {
     const slot = index % 4;
     if (slot === 0) {
       doc.addPage('letter', 'portrait');
       addPdfHeader(doc, logo, 'Receipt Appendix');
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const tableBottom = pageHeight - 54;
+      layout = {
+        tableTop: pdfTableStartY,
+        cellWidth: (pageWidth - pdfMargin * 2 - gap) / 2,
+        cellHeight: (tableBottom - pdfTableStartY - gap) / 2,
+      };
     }
 
     const receipt = receipts[index];
     const row = Math.floor(slot / 2);
     const column = slot % 2;
-    const x = pdfMargin + column * (cellWidth + gap);
-    const y = tableTop + row * (cellHeight + gap);
+    const x = pdfMargin + column * (layout.cellWidth + gap);
+    const y = layout.tableTop + row * (layout.cellHeight + gap);
     const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
-    drawReceiptAppendixCell(doc, receipt, src, x, y, cellWidth, cellHeight);
+    drawReceiptAppendixCell(doc, receipt, src, x, y, layout.cellWidth, layout.cellHeight);
   }
 }
 
