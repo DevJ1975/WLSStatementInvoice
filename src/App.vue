@@ -2176,7 +2176,7 @@ onBeforeUnmount(() => {
       <form @submit.prevent="unlockWithPin">
         <img :src="logoUrl" alt="Workplace Learning System" />
         <h2>Enter app PIN</h2>
-        <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="PIN" />
+        <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="PIN" spellcheck="false" />
         <p v-if="state.auth.pinError" class="status-message gps-message">{{ state.auth.pinError }}</p>
         <button type="submit">Unlock</button>
       </form>
@@ -2454,28 +2454,28 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
-      <form class="report-form" @input="scheduleAutoSave" @change="scheduleAutoSave" @submit.prevent="saveDetailsToMongo">
+      <form class="report-form" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" @submit.prevent="saveDetailsToMongo">
         <h2>Report details</h2>
         <input v-model="meta.clientName" placeholder="Client name" />
         <div class="inline-fields">
-          <input v-model="meta.jobNumber" placeholder="Job number" />
-          <input v-model="meta.poNumber" placeholder="PO number" />
+          <input v-model="meta.jobNumber" placeholder="Job number" spellcheck="false" />
+          <input v-model="meta.poNumber" placeholder="PO number" spellcheck="false" />
         </div>
         <input v-model="meta.siteName" placeholder="Site / location name" />
         <div class="inline-fields">
-          <input v-model="meta.invoiceNumber" placeholder="Invoice number" />
+          <input v-model="meta.invoiceNumber" placeholder="Invoice number" spellcheck="false" />
           <input v-model="meta.billingContact" placeholder="Billing contact" />
         </div>
-        <input v-model="meta.billingEmail" type="email" placeholder="Billing email" />
+        <input v-model="meta.billingEmail" type="email" placeholder="Billing email" spellcheck="false" autocapitalize="off" />
         <input v-model="report.employeeName" placeholder="Employee name" />
         <input v-model="report.address" placeholder="Address" />
         <div class="inline-fields">
-          <input v-model="report.employeeId" placeholder="Employee ID" />
-          <input v-model="report.reportNo" placeholder="Report no." />
+          <input v-model="report.employeeId" placeholder="Employee ID" spellcheck="false" />
+          <input v-model="report.reportNo" placeholder="Report no." spellcheck="false" />
         </div>
         <div class="inline-fields">
-          <input v-model="report.phone" placeholder="Phone" />
-          <input v-model="report.email" type="email" placeholder="Email" />
+          <input v-model="report.phone" placeholder="Phone" spellcheck="false" />
+          <input v-model="report.email" type="email" placeholder="Email" spellcheck="false" autocapitalize="off" />
         </div>
         <div class="inline-fields">
           <input v-model="report.periodFrom" type="date" />
@@ -2561,7 +2561,7 @@ onBeforeUnmount(() => {
 
     <section v-else-if="state.currentProject && state.tab === 'expenses'" class="workbook-view">
       <div class="form-stack">
-        <form @submit.prevent="addExpense">
+        <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addExpense">
           <h2>Add expense line</h2>
           <input v-model="expenseForm.date" type="date" required />
           <input v-model="expenseForm.vendor" placeholder="Vendor" required />
@@ -2573,13 +2573,13 @@ onBeforeUnmount(() => {
           <button type="submit">Add expense</button>
         </form>
 
-        <form class="receipt-capture" @submit.prevent="saveReceiptDraft">
+        <form class="receipt-capture" spellcheck="true" autocapitalize="sentences" @submit.prevent="saveReceiptDraft">
           <h2>Receipt OCR</h2>
           <div v-if="state.receiptQueue.length" class="receipt-queue">
             <strong>{{ state.receiptQueue.length }} receipt{{ state.receiptQueue.length === 1 ? '' : 's' }} saved locally</strong>
             <span>They will be included in the device draft backup until synced.</span>
           </div>
-          <input type="file" accept="image/*" capture="environment" @change="handleReceiptFile" />
+          <input type="file" accept="image/*" capture="environment" spellcheck="false" @change="handleReceiptFile" />
           <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
           <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
           <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
@@ -2647,7 +2647,7 @@ onBeforeUnmount(() => {
 
     <section v-else-if="state.currentProject && state.tab === 'mileage'" class="workbook-view">
       <div class="form-stack">
-        <form @submit.prevent="addMileage">
+        <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addMileage">
           <h2>Add mileage</h2>
           <input v-model="mileageForm.date" type="date" required />
           <div class="address-field">
@@ -2656,6 +2656,7 @@ onBeforeUnmount(() => {
               autocomplete="off"
               placeholder="From"
               required
+              spellcheck="true"
               @input="handleAddressInput('from')"
             />
             <div v-if="state.places.fromSuggestions.length" class="address-suggestions">
@@ -2675,6 +2676,7 @@ onBeforeUnmount(() => {
               autocomplete="off"
               placeholder="To"
               required
+              spellcheck="true"
               @input="handleAddressInput('to')"
             />
             <div v-if="state.places.toSuggestions.length" class="address-suggestions">
@@ -2731,9 +2733,9 @@ onBeforeUnmount(() => {
                 <tr v-for="row in data.mileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
                   <td>{{ row.trackingMode === 'gps' ? 'GPS' : row.calculationMode === 'address-route' ? 'Auto' : 'Manual' }}</td>
                   <td><input class="table-input" v-model="row.date" type="date" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.from" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.to" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.purpose" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.from" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.to" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.purpose" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.01" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td>{{ money.format(row.miles * row.rate) }}</td>
@@ -2774,7 +2776,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'worklog'" class="workbook-view">
-      <form @submit.prevent="addWorkLog">
+      <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addWorkLog">
         <h2>Add work log</h2>
         <input v-model="workLogForm.date" type="date" required />
         <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
