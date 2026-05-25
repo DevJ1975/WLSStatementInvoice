@@ -42,9 +42,13 @@ module.exports = async function handler(req, res) {
         title: body.title || deriveProjectTitle({ ...existing, data }),
         updatedAt: new Date(),
       };
-      await collection.updateOne({ _id }, { $set: update });
+      const result = await collection.updateOne({ _id }, { $set: update });
+      if (!result.acknowledged) {
+        sendJson(res, 500, { error: 'MongoDB did not acknowledge the project save.' });
+        return;
+      }
       const project = await collection.findOne({ _id });
-      sendJson(res, 200, { project: projectPayload(project), storage: 'mongodb' });
+      sendJson(res, 200, { project: projectPayload(project), saved: true, storage: 'mongodb' });
       return;
     }
 
