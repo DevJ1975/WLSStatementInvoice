@@ -2995,8 +2995,8 @@ function addRouteMapAppendix(doc, logo) {
     doc.text(`Miles: ${number.format(row.miles || row.distanceMiles || 0)}`, pdfMargin, 152);
     doc.text(`Source: ${row.trackingMode === 'gps' ? 'GPS trip' : 'Address route'}`, pdfMargin, 168);
     doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, pdfMargin, 184);
-    doc.text(`Start: ${row.startLocation || row.from || ''}`, pdfMargin, 200);
-    doc.text(`End: ${row.endLocation || row.to || ''}`, pdfMargin, 216);
+    doc.text(fitPdfText(doc, `Start: ${row.startLocation || row.from || ''}`, 250), pdfMargin, 200);
+    doc.text(fitPdfText(doc, `End: ${row.endLocation || row.to || ''}`, 250), pdfMargin, 216);
     drawRouteDiagram(doc, points, 292, 120, 456, 300);
   }
 }
@@ -3021,10 +3021,10 @@ function drawRouteDiagram(doc, points, x, y, width, height) {
   });
   const projected = points.map(project);
 
-  doc.setFillColor(248, 250, 251);
-  doc.setDrawColor(200, 209, 214);
-  doc.roundedRect(x, y, width, height, 8, 8, 'FD');
-  doc.setDrawColor(216, 224, 228);
+  drawTopographicBackground(doc, x, y, width, height);
+
+  doc.setDrawColor(197, 210, 208);
+  doc.setLineWidth(0.6);
   for (let index = 1; index < 5; index += 1) {
     const gridX = x + (width / 5) * index;
     const gridY = y + (height / 5) * index;
@@ -3032,6 +3032,11 @@ function drawRouteDiagram(doc, points, x, y, width, height) {
     doc.line(x + 12, gridY, x + width - 12, gridY);
   }
 
+  doc.setDrawColor(255, 255, 255);
+  doc.setLineWidth(6);
+  for (let index = 1; index < projected.length; index += 1) {
+    doc.line(projected[index - 1].x, projected[index - 1].y, projected[index].x, projected[index].y);
+  }
   doc.setDrawColor(132, 98, 104);
   doc.setLineWidth(3);
   for (let index = 1; index < projected.length; index += 1) {
@@ -3041,6 +3046,88 @@ function drawRouteDiagram(doc, points, x, y, width, height) {
   drawRouteEndpoint(doc, projected[0], 'S', [75, 90, 96]);
   drawRouteEndpoint(doc, projected[projected.length - 1], 'E', [132, 98, 104]);
   doc.setLineWidth(1);
+}
+
+function drawTopographicBackground(doc, x, y, width, height) {
+  doc.setFillColor(238, 244, 236);
+  doc.setDrawColor(200, 209, 214);
+  doc.roundedRect(x, y, width, height, 8, 8, 'FD');
+
+  drawTerrainBand(doc, [
+    [x + 12, y + height * 0.76],
+    [x + width * 0.23, y + height * 0.66],
+    [x + width * 0.4, y + height * 0.74],
+    [x + width * 0.62, y + height * 0.58],
+    [x + width - 12, y + height * 0.68],
+    [x + width - 12, y + height - 12],
+    [x + 12, y + height - 12],
+  ], [218, 229, 209]);
+  drawTerrainBand(doc, [
+    [x + 12, y + height * 0.32],
+    [x + width * 0.28, y + height * 0.23],
+    [x + width * 0.48, y + height * 0.36],
+    [x + width * 0.7, y + height * 0.22],
+    [x + width - 12, y + height * 0.34],
+    [x + width - 12, y + height * 0.6],
+    [x + 12, y + height * 0.56],
+  ], [232, 225, 202]);
+  drawTerrainBand(doc, [
+    [x + width * 0.52, y + 12],
+    [x + width - 12, y + 12],
+    [x + width - 12, y + height * 0.4],
+    [x + width * 0.75, y + height * 0.27],
+    [x + width * 0.6, y + height * 0.36],
+  ], [222, 214, 190]);
+  drawTerrainBand(doc, [
+    [x + 12, y + 12],
+    [x + width * 0.38, y + 12],
+    [x + width * 0.28, y + height * 0.26],
+    [x + width * 0.12, y + height * 0.36],
+    [x + 12, y + height * 0.3],
+  ], [210, 225, 219]);
+
+  drawContourLines(doc, x, y, width, height);
+  doc.setDrawColor(200, 209, 214);
+  doc.setLineWidth(1);
+  doc.roundedRect(x, y, width, height, 8, 8, 'S');
+
+  doc.setFontSize(7);
+  doc.setTextColor(105, 118, 105);
+  doc.text('Topographic route diagram', x + 14, y + height - 14);
+  drawNorthArrow(doc, x + width - 34, y + 26);
+}
+
+function drawTerrainBand(doc, points, color) {
+  doc.setFillColor(...color);
+  const [first, ...rest] = points;
+  doc.lines(rest.map((point, index) => [point[0] - points[index][0], point[1] - points[index][1]]), first[0], first[1], [1, 1], 'F', true);
+}
+
+function drawContourLines(doc, x, y, width, height) {
+  doc.setLineWidth(0.5);
+  for (let lineIndex = 0; lineIndex < 11; lineIndex += 1) {
+    const baseY = y + 24 + lineIndex * ((height - 48) / 10);
+    doc.setDrawColor(lineIndex % 2 === 0 ? 177 : 195, lineIndex % 2 === 0 ? 158 : 178, lineIndex % 2 === 0 ? 124 : 145);
+    const segments = 22;
+    let previous = {
+      x: x + 18,
+      y: baseY + Math.sin(lineIndex * 0.9) * 7,
+    };
+    for (let segment = 1; segment <= segments; segment += 1) {
+      const nextX = x + 18 + segment * ((width - 36) / segments);
+      const nextY = baseY + Math.sin(segment * 0.65 + lineIndex * 0.8) * 8 + Math.cos(segment * 0.35) * 3;
+      doc.line(previous.x, previous.y, nextX, nextY);
+      previous = { x: nextX, y: nextY };
+    }
+  }
+}
+
+function drawNorthArrow(doc, x, y) {
+  doc.setFillColor(75, 90, 96);
+  doc.triangle(x, y - 12, x - 6, y + 8, x + 6, y + 8, 'F');
+  doc.setFontSize(7);
+  doc.setTextColor(75, 90, 96);
+  doc.text('N', x, y + 18, { align: 'center' });
 }
 
 function drawRouteEndpoint(doc, point, label, color) {
