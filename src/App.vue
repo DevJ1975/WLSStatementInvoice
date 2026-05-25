@@ -1141,38 +1141,174 @@ async function handleReceiptFile(event) {
 function parseReceiptText(text) {
   const lines = text
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map(cleanOcrLine)
     .filter(Boolean);
-  const amountMatches = [...text.matchAll(/\$?\s?(\d+\.\d{2})/g)].map((match) => Number(match[1]));
-  const dateMatch = text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b/);
-  const amount = amountMatches.length ? Math.max(...amountMatches).toFixed(2) : '';
+  const normalizedText = lines.join('\n');
+  const amount = extractReceiptAmount(lines);
+  const date = extractReceiptDate(normalizedText);
+  const vendor = extractReceiptVendor(lines);
+  const paymentMethod = extractPaymentMethod(normalizedText);
 
   return {
-    vendor: lines[0] || '',
-    date: dateMatch ? normalizeDate(dateMatch[1]) : '',
+    vendor,
+    date,
     amount,
-    category: guessCategory(text),
-    notes: lines.slice(1, 4).join(' '),
+    category: guessCategory(normalizedText),
+    paymentMethod,
+    notes: buildReceiptNotes(lines, { vendor, date, amount, paymentMethod }),
   };
 }
 
+function cleanOcrLine(line) {
+  return line
+    .replace(/[|{}[\]<>]/g, ' ')
+    .replace(/[^\S\r\n]+/g, ' ')
+    .replace(/\bT0TAL\b/gi, 'TOTAL')
+    .replace(/\bT0T\b/gi, 'TOT')
+    .replace(/\bV1SA\b/gi, 'VISA')
+    .replace(/\bAM0UNT\b/gi, 'AMOUNT')
+    .trim();
+}
+
+function extractReceiptAmount(lines) {
+  const candidates = [];
+  lines.forEach((line, index) => {
+    const amounts = [...line.matchAll(/(?:\$|USD)?\s*(-?\d{1,4}(?:,\d{3})*\.\d{2})\b/gi)]
+      .map((match) => Number(match[1].replaceAll(',', '')))
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    for (const value of amounts) {
+      candidates.push({
+        value,
+        score: receiptAmountLineScore(line, index),
+      });
+    }
+  });
+
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => b.score - a.score || b.value - a.value);
+  return candidates[0].value.toFixed(2);
+}
+
+function receiptAmountLineScore(line, index) {
+  const value = line.toLowerCase();
+  let score = index * 0.01;
+  if (/\b(grand\s+total|amount\s+due|balance\s+due|total\s+due|total|sale)\b/.test(value)) score += 80;
+  if (/\b(subtotal|sub\s*total)\b/.test(value)) score += 15;
+  if (/\b(tax|tip|gratuity|fee|discount|coupon|change|cash\s+tendered|tendered|refund)\b/.test(value)) score -= 60;
+  if (/\b(card|visa|mastercard|amex|discover|debit|credit|paid)\b/.test(value)) score += 8;
+  if (/^\s*(total|amount)\b/i.test(line)) score += 25;
+  return score;
+}
+
+function extractReceiptDate(text) {
+  const numericDate =
+    text.match(/\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b/) ||
+    text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/) ||
+    text.match(/\b(\d{1,2}\.\d{1,2}\.\d{2,4})\b/);
+  if (numericDate) return normalizeDate(numericDate[1]);
+
+  const monthDate = text.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2}),?\s+(\d{2,4})\b/i);
+  if (monthDate) return normalizeDate(`${monthNumber(monthDate[1])}/${monthDate[2]}/${monthDate[3]}`);
+  return '';
+}
+
 function normalizeDate(value) {
-  const normalized = value.replaceAll('-', '/');
-  const parts = normalized.split('/');
+  const normalized = value.replaceAll('-', '/').replaceAll('.', '/');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length !== 3) return '';
   if (parts[0]?.length === 4) {
-    return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+    return validDateParts(parts[0], parts[1], parts[2]);
   }
   const year = parts[2]?.length === 2 ? `20${parts[2]}` : parts[2];
-  return year ? `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}` : '';
+  return validDateParts(year, parts[0], parts[1]);
+}
+
+function validDateParts(year, month, day) {
+  const yyyy = Number(year);
+  const mm = Number(month);
+  const dd = Number(day);
+  if (!yyyy || mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
+  return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+
+function monthNumber(month) {
+  return {
+    jan: '01',
+    feb: '02',
+    mar: '03',
+    apr: '04',
+    may: '05',
+    jun: '06',
+    jul: '07',
+    aug: '08',
+    sep: '09',
+    sept: '09',
+    oct: '10',
+    nov: '11',
+    dec: '12',
+  }[month.slice(0, 3).toLowerCase().replace('.', '')] || '';
+}
+
+function extractReceiptVendor(lines) {
+  const vendorLine = lines.find((line) => {
+    const value = line.toLowerCase();
+    return (
+      line.length >= 3 &&
+      /[a-z]/i.test(line) &&
+      !/\d{3}[-.\s]\d{3}[-.\s]\d{4}/.test(line) &&
+      !/\b(receipt|invoice|order|auth|approval|terminal|merchant id|cashier|subtotal|total|tax|change|visa|mastercard|amex|debit|credit|date|time|www\.|http|thank you)\b/.test(value) &&
+      !/\d{1,2}[/-]\d{1,2}[/-]\d{2,4}/.test(line) &&
+      !/\d+\.\d{2}/.test(line)
+    );
+  });
+  return vendorLine ? titleCaseVendor(vendorLine.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '')) : '';
+}
+
+function titleCaseVendor(value) {
+  if (!value) return '';
+  if (/[a-z]/.test(value) && /[A-Z]/.test(value)) return value.slice(0, 60);
+  return value
+    .toLowerCase()
+    .replace(/\b([a-z])/g, (match) => match.toUpperCase())
+    .slice(0, 60);
+}
+
+function extractPaymentMethod(text) {
+  const value = text.toLowerCase();
+  const last4 = text.match(/(?:x{2,}|\*{2,}|ending|acct|account|card)[^\d]{0,8}(\d{4})/i)?.[1];
+  const suffix = last4 ? ` ending ${last4}` : '';
+  if (/apple\s*pay/.test(value)) return `Apple Pay${suffix}`;
+  if (/google\s*pay/.test(value)) return `Google Pay${suffix}`;
+  if (/visa/.test(value)) return `Visa${suffix}`;
+  if (/master\s*card|mastercard|mc\b/.test(value)) return `Mastercard${suffix}`;
+  if (/amex|american express/.test(value)) return `Amex${suffix}`;
+  if (/discover/.test(value)) return `Discover${suffix}`;
+  if (/debit/.test(value)) return `Debit card${suffix}`;
+  if (/credit/.test(value)) return `Credit card${suffix}`;
+  if (/\bcash\b/.test(value)) return 'Cash';
+  if (/\bcheck\b/.test(value)) return 'Check';
+  return '';
+}
+
+function buildReceiptNotes(lines, parsed) {
+  const blocked = [parsed.vendor, parsed.date, parsed.amount, parsed.paymentMethod].filter(Boolean).map((item) => String(item).toLowerCase());
+  return lines
+    .filter((line) => {
+      const value = line.toLowerCase();
+      return !blocked.some((item) => item && value.includes(item)) && !/\b(subtotal|total|tax|change|visa|mastercard|amex|debit|credit|cash|auth|approval)\b/.test(value);
+    })
+    .slice(0, 4)
+    .join(' ');
 }
 
 function guessCategory(text) {
   const value = text.toLowerCase();
-  if (/hotel|inn|suite|lodging/.test(value)) return 'Hotel';
-  if (/gas|fuel|shell|chevron|76 /.test(value)) return 'Fuel';
-  if (/restaurant|coffee|diner|mcdonald|meal|food|denny/.test(value)) return 'Meals';
-  if (/uber|lyft|taxi|parking|transport/.test(value)) return 'Transport';
-  if (/phone|mobile|wireless/.test(value)) return 'Phone';
+  if (/hotel|motel|inn|suite|lodging|marriott|hilton|hyatt|sheraton|hampton|courtyard|holiday inn/.test(value)) return 'Hotel';
+  if (/gas|fuel|shell|chevron|exxon|mobil|arco|bp|76 |valero|speedway|circle k/.test(value)) return 'Fuel';
+  if (/restaurant|coffee|cafe|diner|mcdonald|meal|food|denny|starbucks|subway|taco|burger|pizza|grill|kitchen|bakery/.test(value)) return 'Meals';
+  if (/uber|lyft|taxi|parking|transport|shuttle|metro|airline|airport|train|rental car|hertz|avis|enterprise/.test(value)) return 'Transport';
+  if (/phone|mobile|wireless|verizon|at&t|tmobile|t-mobile/.test(value)) return 'Phone';
+  if (/ticket|event|entertain|movie|theater|golf/.test(value)) return 'Entertain.';
   return 'Misc.';
 }
 
