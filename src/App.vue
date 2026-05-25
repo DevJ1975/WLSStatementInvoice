@@ -2896,9 +2896,15 @@ async function addReceiptAppendix(doc, logo) {
     const column = slot % 2;
     const x = pdfMargin + column * (layout.cellWidth + gap);
     const y = layout.tableTop + row * (layout.cellHeight + gap);
-    const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
+    const src = await receiptImageDataUrlForPdf(receipt);
     drawReceiptAppendixCell(doc, receipt, src, x, y, layout.cellWidth, layout.cellHeight);
   }
+}
+
+async function receiptImageDataUrlForPdf(receipt) {
+  const source = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
+  if (!source) return '';
+  return normalizeImageDataUrlForPdf(source).catch(() => source);
 }
 
 function drawReceiptAppendixCell(doc, receipt, src, x, y, width, height) {
@@ -2961,6 +2967,21 @@ function drawFittedReceiptImage(doc, src, format, x, y, maxWidth, maxHeight) {
   } catch {
     doc.addImage(src, format, x, y, maxWidth, maxHeight, undefined, 'FAST');
   }
+}
+
+async function normalizeImageDataUrlForPdf(src) {
+  const image = await loadImage(src);
+  const canvas = document.createElement('canvas');
+  const maxDimension = 1800;
+  const scale = Math.min(1, maxDimension / Math.max(image.width, image.height));
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const blob = await canvasToJpegBlob(canvas, 0.86);
+  return blobToDataUrl(blob);
 }
 
 function expenseRowIndexForReceipt(receipt) {
