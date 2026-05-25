@@ -15,6 +15,8 @@ const tabs = [
   ['expenses', 'Expense Report'],
   ['mileage', 'Mileage'],
   ['worklog', 'Work Log'],
+  ['print', 'Print View'],
+  ['quickbooks', 'QuickBooks'],
 ];
 const logoUrl = '/wls-logo.jpg';
 
@@ -666,6 +668,20 @@ function backupFileName() {
   return `wls-project-backup-${stamp}.json`;
 }
 
+function safeFileName(name, fallback = 'export') {
+  return (name || fallback).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || fallback;
+}
+
+function downloadTextFile(fileName, content, type = 'text/plain') {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function exportJsonBackup() {
   const payload = {
     app: 'WLS Expense & Invoice Tracker',
@@ -674,13 +690,7 @@ function exportJsonBackup() {
     projects: state.projects.map(normalizeProject),
     currentProjectId: state.currentProject?.id || '',
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = backupFileName();
-  link.click();
-  URL.revokeObjectURL(url);
+  downloadTextFile(backupFileName(), JSON.stringify(payload, null, 2), 'application/json');
 }
 
 function openBackupImport() {
@@ -704,6 +714,93 @@ async function importJsonBackup(event) {
   } finally {
     event.target.value = '';
   }
+}
+
+function csvEscape(value) {
+  const text = value == null ? '' : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function toCsv(rows) {
+  return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
+}
+
+function quickBooksInvoiceRows() {
+  const invoiceNumber = meta.value.invoiceNumber || report.value.reportNo || '';
+  const invoiceDate = report.value.reportDate || new Date().toISOString().slice(0, 10);
+  const customer = meta.value.clientName || meta.value.billingContact || 'Customer';
+  const rows = [
+    ['Invoice No', 'Customer', 'Invoice Date', 'Product/Service', 'Description', 'Qty', 'Rate', 'Amount', 'Project'],
+    ...statementLaborRows.value.map((row) => [
+      invoiceNumber,
+      customer,
+      invoiceDate,
+      row.label,
+      [row.date, row.description].filter(Boolean).join(' | '),
+      row.days,
+      row.rate,
+      Number(row.days || 0) * Number(row.rate || 0),
+      projectTitle(),
+    ]),
+  ];
+
+  if (expenseTotal.value) {
+    rows.push([invoiceNumber, customer, invoiceDate, 'Reimbursable Expenses', 'Expense report total', 1, expenseTotal.value, expenseTotal.value, projectTitle()]);
+  }
+
+  if (mileageTotal.value) {
+    rows.push([
+      invoiceNumber,
+      customer,
+      invoiceDate,
+      'Mileage Reimbursement',
+      `${number.format(totalMiles.value)} miles`,
+      1,
+      mileageTotal.value,
+      mileageTotal.value,
+      projectTitle(),
+    ]);
+  }
+
+  return rows;
+}
+
+function quickBooksExpenseRows() {
+  return [
+    ['Date', 'Payee', 'Category', 'Description', 'Amount', 'Payment Method', 'Project', 'Receipt ID'],
+    ...data.value.expenseRows.map((row) => {
+      const receipt = data.value.receipts.find((item) => item.expenseId === row.id || item.id === row.receiptId);
+      return [
+        row.date,
+        row.vendor,
+        row.category,
+        row.description,
+        Number(row.amount || 0),
+        receipt?.paymentMethod || '',
+        projectTitle(),
+        receipt?.id || row.receiptId || '',
+      ];
+    }),
+  ];
+}
+
+function exportQuickBooksInvoiceCsv() {
+  downloadTextFile(`${safeFileName(projectTitle(), 'quickbooks-invoice')}-quickbooks-invoice.csv`, toCsv(quickBooksInvoiceRows()), 'text/csv');
+}
+
+function exportQuickBooksExpensesCsv() {
+  downloadTextFile(`${safeFileName(projectTitle(), 'quickbooks-expenses')}-quickbooks-expenses.csv`, toCsv(quickBooksExpenseRows()), 'text/csv');
+}
+
+function openPrintView() {
+  state.tab = 'print';
+  nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+}
+
+async function printPackage() {
+  state.tab = 'print';
+  await nextTick();
+  window.print();
 }
 
 async function patchProject(project, patch) {
@@ -1154,6 +1251,10 @@ function formatPeriod() {
 function formatDateRange(from, to) {
   if (from && to) return `${from} - ${to}`;
   return from || to || '';
+}
+
+function reportPrintDate() {
+  return report.value.reportDate || new Date().toISOString().slice(0, 10);
 }
 
 async function handleReceiptFile(event) {
@@ -1962,6 +2063,7 @@ onBeforeUnmount(() => {
         <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</span>
         <button class="secondary" type="button" @click="setAppPin">{{ state.auth.hasPin ? 'Change PIN' : 'Set PIN' }}</button>
         <button v-if="state.auth.hasPin" class="secondary" type="button" @click="clearAppPin">Remove PIN</button>
+        <button class="secondary" type="button" @click="openPrintView">Print View</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
         <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
         <button class="secondary" type="button" @click="resetToBlankTemplate">Reset blank</button>
@@ -2005,6 +2107,188 @@ onBeforeUnmount(() => {
           <p><span>Receipts Queued</span><strong>{{ state.receiptQueue.length }}</strong></p>
         </div>
       </div>
+    </section>
+
+    <section v-else-if="state.currentProject && state.tab === 'print'" class="print-view">
+      <div class="print-toolbar">
+        <div>
+          <h2>Print Preview</h2>
+          <p class="muted">Review the package layout before printing.</p>
+        </div>
+        <div>
+          <button type="button" @click="printPackage">Print Package</button>
+          <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
+        </div>
+      </div>
+
+      <div class="print-package">
+        <article class="print-page">
+          <header class="print-page-header">
+            <img :src="logoUrl" alt="Workplace Learning System" />
+            <div>
+              <h2>Expense Statement</h2>
+              <p>{{ projectTitle() }}</p>
+            </div>
+          </header>
+          <div class="statement-meta print-meta">
+            <div>
+              <strong>{{ report.employeeName || 'Employee' }}</strong>
+              <span>{{ report.address }}</span>
+              <span>{{ report.phone }}</span>
+              <span>{{ report.email }}</span>
+            </div>
+            <dl>
+              <dt>INVOICE NO.</dt><dd>{{ meta.invoiceNumber || report.reportNo }}</dd>
+              <dt>CLIENT</dt><dd>{{ meta.clientName }}</dd>
+              <dt>JOB / PO</dt><dd>{{ [meta.jobNumber, meta.poNumber].filter(Boolean).join(' / ') }}</dd>
+              <dt>DATE</dt><dd>{{ report.reportDate }}</dd>
+              <dt>PERIOD</dt><dd>{{ formatPeriod() }}</dd>
+            </dl>
+          </div>
+          <table class="sheet-table statement-table">
+            <thead><tr><th>Date Range</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr v-for="row in statementLaborRows" :key="`print-${row.label}`">
+                <td>{{ row.date }}</td>
+                <td>{{ row.description }}</td>
+                <td>{{ row.days }}</td>
+                <td>{{ money.format(row.rate) }}</td>
+                <td>{{ money.format(row.days * row.rate) }}</td>
+              </tr>
+              <tr><td></td><td>Expenses</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
+              <tr><td></td><td>Mileage ({{ number.format(totalMiles) }} mi)</td><td></td><td></td><td>{{ money.format(mileageTotal) }}</td></tr>
+              <tr><td></td><td>Total expenses</td><td></td><td></td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr>
+            </tbody>
+            <tfoot><tr><td colspan="4">TOTAL DUE</td><td>{{ money.format(totalDue) }}</td></tr></tfoot>
+          </table>
+          <footer class="print-footer">
+            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
+            <span>Title: {{ projectTitle() }}</span>
+            <span>Date: {{ reportPrintDate() }}</span>
+          </footer>
+        </article>
+
+        <article class="print-page">
+          <header class="print-page-header">
+            <img :src="logoUrl" alt="Workplace Learning System" />
+            <div>
+              <h2>Expense Report</h2>
+              <p>{{ formatPeriod() }}</p>
+            </div>
+          </header>
+          <div class="table-scroll">
+            <table class="sheet-table wide-table">
+              <thead>
+                <tr>
+                  <th>Date</th><th>Vendor</th><th>Description</th>
+                  <th v-for="category in categories" :key="`print-category-${category}`">{{ category }}</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in data.expenseRows" :key="`print-expense-${row.id}`">
+                  <td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td>
+                  <td v-for="category in categories" :key="`print-expense-${row.id}-${category}`">{{ row.category === category ? money.format(row.amount) : '' }}</td>
+                  <td>{{ money.format(row.amount) }}</td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="3">Subtotal</td>
+                  <td v-for="category in categories" :key="`print-total-${category}`">{{ money.format(expenseCategoryTotals[category]) }}</td>
+                  <td>{{ money.format(expenseTotal) }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <footer class="print-footer">
+            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
+            <span>Title: {{ projectTitle() }}</span>
+            <span>Date: {{ reportPrintDate() }}</span>
+          </footer>
+        </article>
+
+        <article class="print-page">
+          <header class="print-page-header">
+            <img :src="logoUrl" alt="Workplace Learning System" />
+            <div>
+              <h2>Mileage Report</h2>
+              <p>{{ number.format(totalMiles) }} total miles</p>
+            </div>
+          </header>
+          <table class="sheet-table">
+            <thead><tr><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr v-for="row in data.mileageRows" :key="`print-mileage-${row.id}`">
+                <td>{{ row.date }}</td>
+                <td>{{ row.from }}</td>
+                <td>{{ row.to }}</td>
+                <td>{{ row.purpose }}</td>
+                <td>{{ number.format(row.miles) }}</td>
+                <td>${{ mileageRate.format(row.rate) }}</td>
+                <td>{{ money.format(row.miles * row.rate) }}</td>
+              </tr>
+            </tbody>
+            <tfoot><tr><td colspan="4">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td></td><td>{{ money.format(mileageTotal) }}</td></tr></tfoot>
+          </table>
+          <footer class="print-footer">
+            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
+            <span>Title: {{ projectTitle() }}</span>
+            <span>Date: {{ reportPrintDate() }}</span>
+          </footer>
+        </article>
+
+        <article class="print-page">
+          <header class="print-page-header">
+            <img :src="logoUrl" alt="Workplace Learning System" />
+            <div>
+              <h2>Work Log</h2>
+              <p>{{ number.format(totalHours) }} total hours</p>
+            </div>
+          </header>
+          <div class="table-scroll">
+            <table class="sheet-table wide-table">
+              <thead><tr><th>#</th><th>Date</th><th>Client / Site</th><th>Location</th><th>Task Category</th><th>Hours</th><th>Work Summary</th><th>Key Findings / Actions</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr v-for="(row, index) in data.workLogs" :key="`print-work-${row.id}`">
+                  <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.clientSite }}</td><td>{{ row.location }}</td><td>{{ row.taskCategory }}</td><td>{{ row.hours }}</td><td>{{ row.summary }}</td><td>{{ row.actions }}</td><td>{{ row.status }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <footer class="print-footer">
+            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
+            <span>Title: {{ projectTitle() }}</span>
+            <span>Date: {{ reportPrintDate() }}</span>
+          </footer>
+        </article>
+      </div>
+    </section>
+
+    <section v-else-if="state.currentProject && state.tab === 'quickbooks'" class="quickbooks-view">
+      <article class="quickbooks-panel">
+        <div class="quickbooks-header">
+          <div class="quickbooks-logo" aria-label="QuickBooks">
+            <span>qb</span>
+            <strong>quickbooks</strong>
+          </div>
+          <div>
+            <h2>QuickBooks Connector</h2>
+            <p class="muted">Export invoice and expense CSV files formatted for QuickBooks import.</p>
+          </div>
+        </div>
+        <div class="connector-status">
+          <p><span>Status</span><strong>CSV export ready</strong></p>
+          <p><span>Invoice</span><strong>{{ meta.invoiceNumber || report.reportNo || 'Not set' }}</strong></p>
+          <p><span>Customer</span><strong>{{ meta.clientName || meta.billingContact || 'Not set' }}</strong></p>
+          <p><span>Total Due</span><strong>{{ money.format(totalDue) }}</strong></p>
+        </div>
+        <div class="quickbooks-actions">
+          <button type="button" @click="exportQuickBooksInvoiceCsv">Export Invoice CSV</button>
+          <button class="secondary" type="button" @click="exportQuickBooksExpensesCsv">Export Expenses CSV</button>
+          <button class="secondary" type="button" @click="openPrintView">Review Print View</button>
+        </div>
+      </article>
     </section>
 
     <section v-else-if="state.tab === 'archive'" class="archive-view">
