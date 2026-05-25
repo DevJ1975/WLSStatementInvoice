@@ -2584,6 +2584,7 @@ function fileToDataUrl(file) {
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const image = new Image();
+    image.crossOrigin = 'anonymous';
     image.onload = () => resolve(image);
     image.onerror = reject;
     image.src = src;
@@ -2896,18 +2897,18 @@ async function addReceiptAppendix(doc, logo) {
     const column = slot % 2;
     const x = pdfMargin + column * (layout.cellWidth + gap);
     const y = layout.tableTop + row * (layout.cellHeight + gap);
-    const src = await receiptImageDataUrlForPdf(receipt);
-    drawReceiptAppendixCell(doc, receipt, src, x, y, layout.cellWidth, layout.cellHeight);
+    const image = await receiptImageForPdf(receipt);
+    drawReceiptAppendixCell(doc, receipt, image, x, y, layout.cellWidth, layout.cellHeight);
   }
 }
 
-async function receiptImageDataUrlForPdf(receipt) {
+async function receiptImageForPdf(receipt) {
   const source = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
-  if (!source) return '';
-  return normalizeImageDataUrlForPdf(source).catch(() => source);
+  if (!source) return null;
+  return normalizeImageDataUrlForPdf(source).catch(() => ({ src: source, format: imageFormatForDataUrl(source) }));
 }
 
-function drawReceiptAppendixCell(doc, receipt, src, x, y, width, height) {
+function drawReceiptAppendixCell(doc, receipt, image, x, y, width, height) {
   const padding = 10;
   const imageTop = y + 78;
   const imageHeight = height - 92;
@@ -2938,9 +2939,8 @@ function drawReceiptAppendixCell(doc, receipt, src, x, y, width, height) {
   doc.setDrawColor(216, 224, 228);
   doc.setFillColor(255, 255, 255);
   doc.roundedRect(x + padding, imageTop, imageWidth, imageHeight, 4, 4, 'FD');
-  if (src) {
-    const format = imageFormatForDataUrl(src);
-    drawFittedReceiptImage(doc, src, format, x + padding + 4, imageTop + 4, imageWidth - 8, imageHeight - 8);
+  if (image?.src) {
+    drawFittedReceiptImage(doc, image.src, image.format, x + padding + 4, imageTop + 4, imageWidth - 8, imageHeight - 8);
   } else {
     doc.setFontSize(8);
     doc.setTextColor(98, 112, 120);
@@ -2980,8 +2980,7 @@ async function normalizeImageDataUrlForPdf(src) {
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  const blob = await canvasToJpegBlob(canvas, 0.86);
-  return blobToDataUrl(blob);
+  return { src: canvas.toDataURL('image/png'), format: 'PNG' };
 }
 
 function expenseRowIndexForReceipt(receipt) {
