@@ -2629,20 +2629,121 @@ async function exportPdf(includeReceipts = false) {
   addRouteMapAppendix(doc, logo);
 
   if (includeReceipts) {
-    for (const receipt of data.value.receipts) {
-      doc.addPage('letter', 'portrait');
-      addPdfHeader(doc, logo, 'Receipt Appendix');
-      doc.setFontSize(10);
-      doc.text(`${receipt.vendor || 'Receipt'} - ${money.format(Number(receipt.amount || 0))}`, pdfMargin, pdfTableStartY);
-      const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
-      if (src) {
-        doc.addImage(src, 'JPEG', pdfMargin, 132, 500, 560, undefined, 'FAST');
-      }
-    }
+    await addReceiptAppendix(doc, logo);
   }
 
   addPdfFooters(doc);
   doc.save(`${projectTitle().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'expense-report'}.pdf`);
+}
+
+async function addReceiptAppendix(doc, logo) {
+  const receipts = data.value.receipts;
+  if (!receipts.length) return;
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const gap = 12;
+  const tableTop = pdfTableStartY;
+  const tableBottom = pageHeight - 54;
+  const cellWidth = (pageWidth - pdfMargin * 2 - gap) / 2;
+  const cellHeight = (tableBottom - tableTop - gap) / 2;
+
+  for (let index = 0; index < receipts.length; index += 1) {
+    const slot = index % 4;
+    if (slot === 0) {
+      doc.addPage('letter', 'portrait');
+      addPdfHeader(doc, logo, 'Receipt Appendix');
+    }
+
+    const receipt = receipts[index];
+    const row = Math.floor(slot / 2);
+    const column = slot % 2;
+    const x = pdfMargin + column * (cellWidth + gap);
+    const y = tableTop + row * (cellHeight + gap);
+    const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
+    drawReceiptAppendixCell(doc, receipt, src, x, y, cellWidth, cellHeight);
+  }
+}
+
+function drawReceiptAppendixCell(doc, receipt, src, x, y, width, height) {
+  const padding = 10;
+  const imageTop = y + 78;
+  const imageHeight = height - 92;
+  const imageWidth = width - padding * 2;
+
+  doc.setDrawColor(200, 209, 214);
+  doc.setFillColor(248, 250, 251);
+  doc.roundedRect(x, y, width, height, 6, 6, 'FD');
+  doc.setDrawColor(216, 224, 228);
+  doc.line(x, y + 70, x + width, y + 70);
+
+  doc.setFontSize(9);
+  doc.setTextColor(23, 32, 42);
+  doc.text(fitPdfText(doc, receipt.vendor || 'Receipt', width - padding * 2), x + padding, y + 17);
+  doc.setFontSize(7);
+  doc.setTextColor(75, 90, 96);
+
+  const detailLines = [
+    `Expense row: ${receiptExpenseReference(receipt)}`,
+    `Date: ${receipt.date || 'Not set'} | Category: ${receipt.category || 'Misc.'}`,
+    `Amount: ${money.format(Number(receipt.amount || 0))}`,
+    `Description: ${receiptDescription(receipt)}`,
+  ];
+  detailLines.forEach((line, index) => {
+    doc.text(fitPdfText(doc, line, width - padding * 2), x + padding, y + 31 + index * 9);
+  });
+
+  doc.setDrawColor(216, 224, 228);
+  doc.setFillColor(255, 255, 255);
+  doc.roundedRect(x + padding, imageTop, imageWidth, imageHeight, 4, 4, 'FD');
+  if (src) {
+    const format = imageFormatForDataUrl(src);
+    drawFittedReceiptImage(doc, src, format, x + padding + 4, imageTop + 4, imageWidth - 8, imageHeight - 8);
+  } else {
+    doc.setFontSize(8);
+    doc.setTextColor(98, 112, 120);
+    doc.text('Receipt image unavailable', x + width / 2, imageTop + imageHeight / 2, { align: 'center' });
+  }
+}
+
+function drawFittedReceiptImage(doc, src, format, x, y, maxWidth, maxHeight) {
+  try {
+    const { width, height } = doc.getImageProperties(src);
+    const scale = Math.min(maxWidth / width, maxHeight / height);
+    const drawWidth = width * scale;
+    const drawHeight = height * scale;
+    doc.addImage(
+      src,
+      format,
+      x + (maxWidth - drawWidth) / 2,
+      y + (maxHeight - drawHeight) / 2,
+      drawWidth,
+      drawHeight,
+      undefined,
+      'FAST',
+    );
+  } catch {
+    doc.addImage(src, format, x, y, maxWidth, maxHeight, undefined, 'FAST');
+  }
+}
+
+function expenseRowIndexForReceipt(receipt) {
+  return data.value.expenseRows.findIndex((row) => row.id === receipt.expenseId || row.receiptId === receipt.id);
+}
+
+function receiptExpenseReference(receipt) {
+  const index = expenseRowIndexForReceipt(receipt);
+  return index >= 0 ? `Expense Report row ${index + 1}` : 'Expense row not found';
+}
+
+function receiptDescription(receipt) {
+  const index = expenseRowIndexForReceipt(receipt);
+  const row = index >= 0 ? data.value.expenseRows[index] : null;
+  return row?.description || receipt.notes || receipt.vendor || 'Receipt expense';
+}
+
+function imageFormatForDataUrl(src) {
+  return /^data:image\/png/i.test(src || '') ? 'PNG' : 'JPEG';
 }
 
 function addRouteMapAppendix(doc, logo) {
@@ -3336,6 +3437,8 @@ onBeforeUnmount(() => {
             <div>
               <h3>{{ receipt.vendor || 'Receipt' }}</h3>
               <p>{{ receipt.date }} | {{ receipt.category }} | {{ money.format(receipt.amount || 0) }}</p>
+              <p class="receipt-location">{{ receiptExpenseReference(receipt) }}</p>
+              <p class="receipt-description">{{ receiptDescription(receipt) }}</p>
             </div>
           </article>
         </div>

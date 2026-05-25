@@ -1085,6 +1085,19 @@ h3 {
   margin: 10px 0 4px;
 }
 
+.receipt-location {
+  margin: 6px 0 0;
+  font-weight: 800;
+  color: #4b5a60;
+}
+
+.receipt-description {
+  margin: 4px 0 0;
+  color: #627078;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .mileage-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;
