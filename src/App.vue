@@ -22,6 +22,17 @@ const logoUrl = '/wls-logo.jpg';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const number = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const mileageRate = new Intl.NumberFormat('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const headerDateFormatter = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+const headerTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+});
 const gpsAccuracyLimit = 250;
 const metersPerMile = 1609.344;
 const receiptImageTargetBytes = 900 * 1024;
@@ -36,6 +47,7 @@ const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
 const autosaveDelayMs = 900;
 const localArchiveDelayMs = 500;
+const weatherRefreshMs = 15 * 60 * 1000;
 const appVersionText = [`v${__APP_VERSION__}`, __APP_COMMIT__ ? `build ${__APP_COMMIT__}` : '', formatBuildDate(__APP_BUILD_DATE__)].filter(Boolean).join(' | ');
 const footerBrandText = `Powered by Trainovate Technologies LLC Copyright 2026 | ${appVersionText}`;
 
@@ -90,6 +102,20 @@ const state = reactive({
     waitingForOperand: false,
     history: '',
   },
+  header: {
+    now: new Date(),
+    weatherLoading: false,
+    weatherError: '',
+    weather: {
+      temperature: null,
+      condition: '',
+      code: null,
+      isDay: true,
+      windMph: null,
+      locationLabel: 'Current location',
+      updatedAt: '',
+    },
+  },
 });
 
 const routeMapEl = ref(null);
@@ -119,6 +145,8 @@ let routeMap = null;
 let routeLayer = null;
 let leafletApi = null;
 let leafletLoader = null;
+let clockTimer = null;
+let weatherTimer = null;
 
 const data = computed(() => state.currentProject?.data || blankProjectData());
 const meta = computed(() => data.value.meta);
@@ -201,6 +229,15 @@ const workLogCategoryTotals = computed(() =>
 );
 const projectReviewItems = computed(() => buildProjectReviewItems(data.value));
 const receiptDraftMissingFields = computed(() => missingReceiptDraftFields());
+const headerDateText = computed(() => headerDateFormatter.format(state.header.now));
+const headerTimeText = computed(() => headerTimeFormatter.format(state.header.now));
+const weatherVisualClass = computed(() => weatherIconClass(state.header.weather.code, state.header.weather.isDay));
+const weatherText = computed(() => {
+  if (state.header.weatherLoading) return 'Updating weather';
+  if (state.header.weatherError) return state.header.weatherError;
+  if (state.header.weather.temperature === null) return 'Weather pending';
+  return `${Math.round(state.header.weather.temperature)}°F ${state.header.weather.condition}`;
+});
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -2264,6 +2301,102 @@ function formatBuildDate(value) {
   }).format(new Date(value));
 }
 
+function startHeaderClock() {
+  state.header.now = new Date();
+  clockTimer = window.setInterval(() => {
+    state.header.now = new Date();
+  }, 1000);
+}
+
+function stopHeaderClock() {
+  if (clockTimer) {
+    window.clearInterval(clockTimer);
+    clockTimer = null;
+  }
+  if (weatherTimer) {
+    window.clearInterval(weatherTimer);
+    weatherTimer = null;
+  }
+}
+
+function startHeaderWeather() {
+  if (weatherTimer) return;
+  loadHeaderWeather();
+  weatherTimer = window.setInterval(loadHeaderWeather, weatherRefreshMs);
+}
+
+function weatherIconClass(code, isDay = true) {
+  if (code === null || code === undefined) return 'weather-cloud';
+  if ([0, 1].includes(code)) return isDay ? 'weather-sun' : 'weather-night';
+  if ([2, 3].includes(code)) return 'weather-cloud';
+  if ([45, 48].includes(code)) return 'weather-fog';
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 'weather-rain';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'weather-snow';
+  if ([95, 96, 99].includes(code)) return 'weather-storm';
+  return 'weather-cloud';
+}
+
+function weatherCodeText(code) {
+  if (code === 0) return 'Clear';
+  if (code === 1) return 'Mostly clear';
+  if (code === 2) return 'Partly cloudy';
+  if (code === 3) return 'Cloudy';
+  if ([45, 48].includes(code)) return 'Fog';
+  if ([51, 53, 55, 56, 57].includes(code)) return 'Drizzle';
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 'Rain';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'Snow';
+  if ([95, 96, 99].includes(code)) return 'Storm';
+  return 'Weather';
+}
+
+function currentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Location unavailable'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: false,
+      maximumAge: 10 * 60 * 1000,
+      timeout: 10000,
+    });
+  });
+}
+
+async function loadHeaderWeather() {
+  state.header.weatherLoading = true;
+  state.header.weatherError = '';
+  try {
+    const position = await currentPosition();
+    const { latitude, longitude } = position.coords;
+    const params = new URLSearchParams({
+      latitude: latitude.toFixed(4),
+      longitude: longitude.toFixed(4),
+      current: 'temperature_2m,weather_code,is_day,wind_speed_10m',
+      temperature_unit: 'fahrenheit',
+      wind_speed_unit: 'mph',
+      timezone: 'auto',
+    });
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`);
+    if (!response.ok) throw new Error('Weather unavailable');
+    const result = await response.json();
+    const current = result.current || {};
+    state.header.weather = {
+      temperature: Number.isFinite(current.temperature_2m) ? current.temperature_2m : null,
+      condition: weatherCodeText(current.weather_code),
+      code: current.weather_code,
+      isDay: current.is_day !== 0,
+      windMph: Number.isFinite(current.wind_speed_10m) ? current.wind_speed_10m : null,
+      locationLabel: 'Current location',
+      updatedAt: current.time || new Date().toISOString(),
+    };
+  } catch (error) {
+    state.header.weatherError = error?.code === 1 ? 'Allow location for weather' : error.message || 'Weather unavailable';
+  } finally {
+    state.header.weatherLoading = false;
+  }
+}
+
 async function hashPin(pin) {
   const bytes = new TextEncoder().encode(`wls-pin:${pin}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -2276,6 +2409,7 @@ async function initializeSecurity() {
   state.auth.unlocked = !state.auth.hasPin;
   state.auth.checked = true;
   if (state.auth.unlocked) {
+    startHeaderWeather();
     await loadProjects();
   } else {
     state.loading = false;
@@ -2287,6 +2421,7 @@ async function unlockWithPin() {
   const storedHash = localStorage.getItem(pinHashStorageKey);
   if (!storedHash) {
     state.auth.unlocked = true;
+    startHeaderWeather();
     await loadProjects();
     return;
   }
@@ -2296,6 +2431,7 @@ async function unlockWithPin() {
   }
   state.auth.pinInput = '';
   state.auth.unlocked = true;
+  startHeaderWeather();
   await loadProjects();
 }
 
@@ -2878,11 +3014,13 @@ watch(
 
 onMounted(() => {
   window.addEventListener('beforeunload', flushLocalArchiveBeforeUnload);
+  startHeaderClock();
   initializeSecurity();
 });
 onBeforeUnmount(() => {
   flushLocalArchive(false);
   clearAutosaveTimer();
+  stopHeaderClock();
   stopGpsTripWatcher();
   revokeReceiptPreview();
   window.removeEventListener('beforeunload', flushLocalArchiveBeforeUnload);
@@ -2922,6 +3060,21 @@ onBeforeUnmount(() => {
           <h1>{{ state.currentProject ? projectTitle() : 'Expense Statement' }}</h1>
         </div>
       </div>
+      <section class="header-live" aria-label="Current date, time, and weather">
+        <div class="clock-card">
+          <span>{{ headerDateText }}</span>
+          <strong>{{ headerTimeText }}</strong>
+        </div>
+        <div class="weather-card">
+          <span class="weather-graphic" :class="weatherVisualClass" aria-hidden="true">
+            <i></i><b></b><em></em>
+          </span>
+          <div>
+            <strong>{{ weatherText }}</strong>
+            <span>{{ state.header.weather.locationLabel }}</span>
+          </div>
+        </div>
+      </section>
       <div class="header-actions">
         <span class="mode-pill">{{ syncStatusText }}</span>
         <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</span>
