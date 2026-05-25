@@ -1462,7 +1462,7 @@ onBeforeUnmount(() => {
           </div>
           <input v-model="mileageForm.purpose" placeholder="Purpose" />
           <div class="inline-fields compact">
-            <input v-model="mileageForm.miles" type="number" min="0" step="0.1" placeholder="Miles" required />
+            <input v-model="mileageForm.miles" type="number" min="0" step="0.01" placeholder="Miles" required />
             <input v-model="mileageForm.rate" type="number" min="0" step="0.001" placeholder="Rate" required />
           </div>
           <p v-if="state.places.loadingField" class="muted">Looking up {{ state.places.loadingField }} address...</p>
@@ -1506,7 +1506,7 @@ onBeforeUnmount(() => {
                   <td><input class="table-input" v-model="row.from" @change="saveCurrentProject" /></td>
                   <td><input class="table-input" v-model="row.to" @change="saveCurrentProject" /></td>
                   <td><input class="table-input" v-model="row.purpose" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.1" @change="saveCurrentProject" /></td>
+                  <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.01" @change="saveCurrentProject" /></td>
                   <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @change="saveCurrentProject" /></td>
                   <td>{{ money.format(row.miles * row.rate) }}</td>
                   <td>
