@@ -27,6 +27,12 @@ const receiptImageTargetBytes = 900 * 1024;
 const receiptImageMaxBytes = 3 * 1024 * 1024;
 const receiptImageMaxDimension = 1600;
 const receiptImageMinDimension = 900;
+const pdfMargin = 42;
+const pdfHeaderTop = 26;
+const pdfLogoWidth = 132;
+const pdfLogoHeight = 56;
+const pdfHeaderLineY = 94;
+const pdfTableStartY = 114;
 
 const state = reactive({
   loading: true,
@@ -1702,10 +1708,8 @@ async function exportPdf(includeReceipts = false) {
   const logo = await imageToDataUrl(logoUrl).catch(() => '');
 
   addPdfHeader(doc, logo, 'Expense Statement');
-  doc.setFontSize(10);
-  doc.text(projectTitle(), 42, 74);
   autoTable(doc, {
-    startY: 92,
+    startY: pdfTableStartY,
     head: [['Date Range', 'Description', '# of Days', 'Daily Rate', 'Total']],
     body: [
       ...statementLaborRows.value.map((row) => [row.date, row.description, row.days, money.format(row.rate), money.format(row.days * row.rate)]),
@@ -1716,34 +1720,37 @@ async function exportPdf(includeReceipts = false) {
     ],
     theme: 'grid',
     headStyles: { fillColor: [75, 90, 96] },
+    margin: { bottom: 52 },
   });
 
   doc.addPage('letter', 'landscape');
   addPdfHeader(doc, logo, 'Expense Report');
   autoTable(doc, {
-    startY: 82,
+    startY: pdfTableStartY,
     head: [['Date', 'Vendor', 'Description', 'Category', 'Amount']],
     body: data.value.expenseRows.map((row) => [row.date, row.vendor, row.description, row.category, money.format(Number(row.amount || 0))]),
     foot: [['', '', '', 'Total', money.format(expenseTotal.value)]],
     theme: 'grid',
     headStyles: { fillColor: [75, 90, 96] },
+    margin: { bottom: 52 },
   });
 
   doc.addPage('letter', 'landscape');
   addPdfHeader(doc, logo, 'Work Log');
   autoTable(doc, {
-    startY: 82,
+    startY: pdfTableStartY,
     head: [['Date', 'Client / Site', 'Location', 'Task Category', 'Hours', 'Summary', 'Actions']],
     body: data.value.workLogs.map((row) => [row.date, row.clientSite, row.location, row.taskCategory, row.hours, row.summary, row.actions]),
     theme: 'grid',
     headStyles: { fillColor: [75, 90, 96] },
     styles: { fontSize: 8, cellWidth: 'wrap' },
+    margin: { bottom: 52 },
   });
 
   doc.addPage('letter', 'landscape');
   addPdfHeader(doc, logo, 'Mileage Report');
   autoTable(doc, {
-    startY: 82,
+    startY: pdfTableStartY,
     head: [['Date', 'From', 'To', 'Purpose', 'Miles', '$ Per Mile', 'Total']],
     body: data.value.mileageRows.map((row) => [
       row.date,
@@ -1761,6 +1768,7 @@ async function exportPdf(includeReceipts = false) {
     foot: [['', '', '', 'Totals', number.format(totalMiles.value), '', money.format(mileageTotal.value)]],
     theme: 'grid',
     headStyles: { fillColor: [75, 90, 96] },
+    margin: { bottom: 52 },
   });
 
   addRouteMapAppendix(doc, logo);
@@ -1770,14 +1778,15 @@ async function exportPdf(includeReceipts = false) {
       doc.addPage('letter', 'portrait');
       addPdfHeader(doc, logo, 'Receipt Appendix');
       doc.setFontSize(10);
-      doc.text(`${receipt.vendor || 'Receipt'} - ${money.format(Number(receipt.amount || 0))}`, 42, 82);
+      doc.text(`${receipt.vendor || 'Receipt'} - ${money.format(Number(receipt.amount || 0))}`, pdfMargin, pdfTableStartY);
       const src = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
       if (src) {
-        doc.addImage(src, 'JPEG', 42, 104, 500, 610, undefined, 'FAST');
+        doc.addImage(src, 'JPEG', pdfMargin, 132, 500, 560, undefined, 'FAST');
       }
     }
   }
 
+  addPdfFooters(doc);
   doc.save(`${projectTitle().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'expense-report'}.pdf`);
 }
 
@@ -1789,14 +1798,14 @@ function addRouteMapAppendix(doc, logo) {
     addPdfHeader(doc, logo, 'Route Map Appendix');
     doc.setFontSize(10);
     doc.setTextColor(23, 32, 42);
-    doc.text(`Date: ${row.date || ''}`, 42, 88);
-    doc.text(`Purpose: ${row.purpose || 'GPS trip'}`, 42, 104);
-    doc.text(`Miles: ${number.format(row.miles || row.distanceMiles || 0)}`, 42, 120);
-    doc.text(`Source: ${row.trackingMode === 'gps' ? 'GPS trip' : 'Address route'}`, 42, 136);
-    doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, 42, 152);
-    doc.text(`Start: ${row.startLocation || row.from || ''}`, 42, 168);
-    doc.text(`End: ${row.endLocation || row.to || ''}`, 42, 184);
-    drawRouteDiagram(doc, points, 292, 88, 456, 300);
+    doc.text(`Date: ${row.date || ''}`, pdfMargin, 120);
+    doc.text(`Purpose: ${row.purpose || 'GPS trip'}`, pdfMargin, 136);
+    doc.text(`Miles: ${number.format(row.miles || row.distanceMiles || 0)}`, pdfMargin, 152);
+    doc.text(`Source: ${row.trackingMode === 'gps' ? 'GPS trip' : 'Address route'}`, pdfMargin, 168);
+    doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, pdfMargin, 184);
+    doc.text(`Start: ${row.startLocation || row.from || ''}`, pdfMargin, 200);
+    doc.text(`End: ${row.endLocation || row.to || ''}`, pdfMargin, 216);
+    drawRouteDiagram(doc, points, 292, 120, 456, 300);
   }
 }
 
@@ -1851,12 +1860,46 @@ function drawRouteEndpoint(doc, point, label, color) {
 }
 
 function addPdfHeader(doc, logo, title) {
-  if (logo) doc.addImage(logo, 'JPEG', 42, 24, 135, 49, undefined, 'FAST');
+  const pageWidth = doc.internal.pageSize.getWidth();
+  if (logo) doc.addImage(logo, 'JPEG', pdfMargin, pdfHeaderTop, pdfLogoWidth, pdfLogoHeight, undefined, 'FAST');
   doc.setFontSize(18);
   doc.setTextColor(75, 90, 96);
-  doc.text(title, 720, 52, { align: 'right' });
+  doc.text(title, pageWidth - pdfMargin, 62, { align: 'right' });
   doc.setDrawColor(216, 224, 228);
-  doc.line(42, 66, 750, 66);
+  doc.line(pdfMargin, pdfHeaderLineY, pageWidth - pdfMargin, pdfHeaderLineY);
+}
+
+function addPdfFooters(doc) {
+  const invoiceNumber = meta.value.invoiceNumber || report.value.reportNo || 'Not set';
+  const title = projectTitle();
+  const date = report.value.reportDate || new Date().toISOString().slice(0, 10);
+  const pageCount = doc.internal.getNumberOfPages();
+
+  for (let page = 1; page <= pageCount; page += 1) {
+    doc.setPage(page);
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const footerLineY = pageHeight - 42;
+    const footerTextY = pageHeight - 24;
+
+    doc.setDrawColor(216, 224, 228);
+    doc.line(pdfMargin, footerLineY, pageWidth - pdfMargin, footerLineY);
+    doc.setFontSize(8);
+    doc.setTextColor(75, 90, 96);
+    const footerTitle = fitPdfText(doc, `Title: ${title}`, pageWidth - pdfMargin * 2 - 300);
+    doc.text(`Invoice: ${invoiceNumber}`, pdfMargin, footerTextY);
+    doc.text(footerTitle, pageWidth / 2, footerTextY, { align: 'center' });
+    doc.text(`Date: ${date}`, pageWidth - pdfMargin, footerTextY, { align: 'right' });
+  }
+}
+
+function fitPdfText(doc, text, maxWidth) {
+  if (doc.getTextWidth(text) <= maxWidth) return text;
+  let clipped = text;
+  while (clipped.length > 1 && doc.getTextWidth(`${clipped}...`) > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped.trim()}...`;
 }
 
 watch(
