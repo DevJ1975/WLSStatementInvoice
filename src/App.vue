@@ -35,6 +35,7 @@ const state = reactive({
   projects: [],
   currentProject: null,
   syncingLocal: false,
+  recoveryStatus: '',
   receiptOcrRunning: false,
   receiptUploading: false,
   receiptDraft: emptyReceiptDraft(),
@@ -289,6 +290,16 @@ function uniqueProjects(projects) {
   });
 }
 
+function findDeviceDrafts(localProjects, cloudProjects) {
+  const cloudSignatures = new Map(cloudProjects.map((project) => [project.id, projectDataSignature(project)]));
+  return uniqueProjects(
+    localProjects
+      .filter(projectHasUserData)
+      .filter((project) => isDeviceDraft(project) || cloudSignatures.get(project.id) !== projectDataSignature(project))
+      .map(asDeviceDraft)
+  ).map(normalizeProject);
+}
+
 function projectTitle(project = state.currentProject) {
   if (!project) return 'Untitled expense project';
   const projectReport = project.data?.report || {};
@@ -375,22 +386,20 @@ async function apiJson(path, options = {}) {
 async function loadProjects() {
   state.loading = true;
   state.error = '';
+  state.recoveryStatus = '';
   const localArchive = loadLocalArchive();
 
   try {
     const payload = await apiJson('/api/projects');
     const cloudProjects = payload.projects.map(normalizeProject);
-    const cloudSignatures = new Map(cloudProjects.map((project) => [project.id, projectDataSignature(project)]));
-    const deviceDrafts = localArchive.projects
-      .filter(projectHasUserData)
-      .filter((project) => isDeviceDraft(project) || cloudSignatures.get(project.id) !== projectDataSignature(project))
-      .map(asDeviceDraft);
+    const deviceDrafts = findDeviceDrafts(localArchive.projects, cloudProjects);
 
     state.projects = uniqueProjects([...cloudProjects, ...deviceDrafts]).map(normalizeProject);
     state.storage = 'mongodb';
 
     if (deviceDrafts.length) {
       state.error = `${deviceDrafts.length} device draft${deviceDrafts.length === 1 ? '' : 's'} found. Sync device drafts to cloud before switching devices.`;
+      state.recoveryStatus = 'Device drafts are available on this device. Use the green sync button to upload them.';
     }
 
     if (!cloudProjects.length && !deviceDrafts.length) {
@@ -409,6 +418,24 @@ async function loadProjects() {
   } finally {
     state.loading = false;
   }
+}
+
+function recheckDeviceDrafts() {
+  const localArchive = loadLocalArchive();
+  const cloudProjects = state.projects.filter((project) => !isDeviceDraft(project));
+  const deviceDrafts = findDeviceDrafts(localArchive.projects, cloudProjects);
+  state.projects = uniqueProjects([...cloudProjects, ...deviceDrafts]).map(normalizeProject);
+
+  if (deviceDrafts.length) {
+    state.error = `${deviceDrafts.length} device draft${deviceDrafts.length === 1 ? '' : 's'} found.`;
+    state.recoveryStatus = 'Device drafts are available. Tap the green sync button to upload them to MongoDB.';
+    const preferredDraft = deviceDrafts.find((project) => project.originalProjectId === localArchive.currentProjectId || project.id === localArchive.currentProjectId) || deviceDrafts[0];
+    state.currentProject = preferredDraft;
+  } else {
+    state.recoveryStatus = 'No device drafts were found in this browser storage. MongoDB cloud sync is active.';
+  }
+
+  saveLocalArchive();
 }
 
 async function createProject(title = 'Untitled expense project') {
@@ -1495,8 +1522,10 @@ onBeforeUnmount(() => {
         <button v-if="state.storage === 'mongodb' && localProjectCount" class="sync-cloud-button" type="button" :disabled="state.syncingLocal" @click="syncLocalProjectsToCloud">
           {{ state.syncingLocal ? 'Syncing device drafts...' : `Sync ${localProjectCount} device draft${localProjectCount === 1 ? '' : 's'} to cloud` }}
         </button>
+        <button v-if="state.storage === 'mongodb'" class="secondary" type="button" @click="recheckDeviceDrafts">Recheck device storage</button>
         <button type="button" @click="createProject()">New project</button>
       </div>
+      <p v-if="state.recoveryStatus" class="sync-status">{{ state.recoveryStatus }}</p>
       <div class="archive-list">
         <article v-for="project in state.projects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
           <div>
