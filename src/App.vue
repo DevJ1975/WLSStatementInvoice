@@ -36,7 +36,8 @@ const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
 const autosaveDelayMs = 900;
 const localArchiveDelayMs = 500;
-const footerBrandText = 'Powered by Trainovate Technologies LLC Copyright 2026';
+const appVersionText = [`v${__APP_VERSION__}`, __APP_COMMIT__ ? `build ${__APP_COMMIT__}` : '', formatBuildDate(__APP_BUILD_DATE__)].filter(Boolean).join(' | ');
+const footerBrandText = `Powered by Trainovate Technologies LLC Copyright 2026 | ${appVersionText}`;
 
 const state = reactive({
   loading: true,
@@ -2251,6 +2252,15 @@ function formatDateTime(value) {
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function formatBuildDate(value) {
+  if (!value) return '';
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
   }).format(new Date(value));
 }
 
