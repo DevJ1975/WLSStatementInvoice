@@ -32,6 +32,7 @@ const state = reactive({
   tab: 'archive',
   projects: [],
   currentProject: null,
+  syncingLocal: false,
   receiptOcrRunning: false,
   receiptUploading: false,
   receiptDraft: emptyReceiptDraft(),
@@ -87,6 +88,7 @@ const totalHours = computed(() => data.value.workLogs.reduce((sum, row) => sum +
 const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value / data.value.workLogs.length : 0));
 const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
 const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => rowRoutePoints(row).length));
+const localProjectCount = computed(() => state.projects.filter((project) => project.id.startsWith('local-')).length);
 const selectedMileageRoute = computed(() => {
   if (state.gps.selectedMileageId === 'draft-route') return null;
   return routeMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || routeMileageRows.value[0] || null;
@@ -293,21 +295,28 @@ async function apiJson(path, options = {}) {
 async function loadProjects() {
   state.loading = true;
   state.error = '';
+  const localArchive = loadLocalArchive();
+  const localOnlyProjects = localArchive.projects.filter((project) => project.id.startsWith('local-'));
 
   try {
     const payload = await apiJson('/api/projects');
-    state.projects = payload.projects.map(normalizeProject);
+    state.projects = [...payload.projects.map(normalizeProject), ...localOnlyProjects];
     state.storage = 'mongodb';
 
-    if (!state.projects.length) {
+    if (localOnlyProjects.length) {
+      state.error = `${localOnlyProjects.length} local project${localOnlyProjects.length === 1 ? '' : 's'} found on this device. Sync local projects to cloud before switching devices.`;
+    }
+
+    if (!payload.projects.length && !localOnlyProjects.length) {
       await createProject('Untitled expense project');
+    } else if (localArchive.currentProjectId?.startsWith('local-') && localOnlyProjects.some((project) => project.id === localArchive.currentProjectId)) {
+      await openProject(localArchive.currentProjectId);
     } else {
-      await openProject(state.projects[0].id);
+      await openProject(payload.projects[0]?.id || state.projects[0].id);
     }
   } catch {
-    const archive = loadLocalArchive();
-    state.projects = archive.projects.length ? archive.projects : [blankProject()];
-    state.currentProject = state.projects.find((project) => project.id === archive.currentProjectId) || state.projects[0];
+    state.projects = localArchive.projects.length ? localArchive.projects : [blankProject()];
+    state.currentProject = state.projects.find((project) => project.id === localArchive.currentProjectId) || state.projects[0];
     state.storage = 'local';
     state.error = 'Using local fallback. MongoDB sync is unavailable in this session.';
     saveLocalArchive();
@@ -335,7 +344,7 @@ async function createProject(title = 'Untitled expense project') {
 
 async function openProject(id) {
   stopGpsTripWatcher();
-  if (state.storage === 'mongodb') {
+  if (state.storage === 'mongodb' && !id.startsWith('local-')) {
     const payload = await apiJson(`/api/projects/${id}`);
     state.currentProject = normalizeProject(payload.project);
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
@@ -356,7 +365,7 @@ async function saveCurrentProject() {
   if (index >= 0) state.projects[index] = state.currentProject;
   saveLocalArchive();
 
-  if (state.storage !== 'mongodb') return;
+  if (state.storage !== 'mongodb' || state.currentProject.id.startsWith('local-')) return;
 
   try {
     state.saving = true;
@@ -375,6 +384,44 @@ async function saveCurrentProject() {
     state.error = 'Saved locally only. MongoDB sync is unavailable in this session.';
   } finally {
     state.saving = false;
+  }
+}
+
+async function syncLocalProjectsToCloud() {
+  const localProjects = state.projects.filter((project) => project.id.startsWith('local-'));
+  if (!localProjects.length) return;
+
+  state.syncingLocal = true;
+  try {
+    const replacements = new Map();
+    for (const project of localProjects) {
+      const created = await apiJson('/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({ title: project.title || projectTitle(project) }),
+      });
+      const saved = await apiJson(`/api/projects/${created.project.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          title: project.title || projectTitle(project),
+          data: project.data,
+        }),
+      });
+      replacements.set(project.id, normalizeProject(saved.project));
+    }
+
+    const currentId = state.currentProject?.id || '';
+    state.projects = state.projects.map((project) => replacements.get(project.id) || project);
+    const replacement = replacements.get(currentId);
+    if (replacement) {
+      await openProject(replacement.id);
+    } else {
+      saveLocalArchive();
+    }
+    state.error = 'Local projects synced to cloud. You can now open this app from another device.';
+  } catch (error) {
+    state.error = `Local project sync failed: ${error.message}`;
+  } finally {
+    state.syncingLocal = false;
   }
 }
 
@@ -1345,6 +1392,9 @@ onBeforeUnmount(() => {
     <section v-else-if="state.tab === 'archive'" class="archive-view">
       <div class="archive-toolbar">
         <h2>Project archive</h2>
+        <button v-if="state.storage === 'mongodb' && localProjectCount" class="secondary" type="button" :disabled="state.syncingLocal" @click="syncLocalProjectsToCloud">
+          {{ state.syncingLocal ? 'Syncing...' : `Sync ${localProjectCount} local to cloud` }}
+        </button>
         <button type="button" @click="createProject()">New project</button>
       </div>
       <div class="archive-list">
