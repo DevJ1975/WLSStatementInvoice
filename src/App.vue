@@ -192,7 +192,7 @@ const totalHours = computed(() => data.value.workLogs.reduce((sum, row) => sum +
 const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value / data.value.workLogs.length : 0));
 const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
 const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => rowRoutePoints(row).length));
-const localProjectCount = computed(() => deviceDraftProjects().length);
+const localProjectCount = computed(() => uniqueDeviceDrafts(deviceDraftProjects()).length);
 const dashboardStats = computed(() => {
   const projects = state.projects || [];
   return {
@@ -435,6 +435,10 @@ function projectDataSignature(project) {
   return JSON.stringify(normalizeProject(project).data);
 }
 
+function projectTitleBase(project) {
+  return (project?.title || projectTitle(project)).replace(/\s+\(device draft\)$/, '').trim() || 'Untitled expense project';
+}
+
 function isPersistedMongoProject(project) {
   return Boolean(project?.id && /^[a-f\d]{24}$/i.test(project.id) && !isDeviceDraft(project));
 }
@@ -446,7 +450,7 @@ function deviceDraftId(project) {
 
 function asDeviceDraft(project) {
   const originalProjectId = project.originalProjectId || (project.id?.startsWith(deviceDraftPrefix) ? project.id.slice(deviceDraftPrefix.length) : project.id);
-  const title = (project.title || projectTitle(project)).replace(/\s+\(device draft\)$/, '');
+  const title = projectTitleBase(project);
   return {
     ...normalizeProject(project),
     id: deviceDraftId(project),
@@ -455,11 +459,24 @@ function asDeviceDraft(project) {
   };
 }
 
+function projectIdentityKey(project) {
+  const normalized = normalizeProject(project);
+  const signature = projectDataSignature(normalized);
+  const originalProjectId = normalized.originalProjectId && !normalized.originalProjectId.startsWith('local-') ? normalized.originalProjectId : '';
+  const sourceId = originalProjectId || (isPersistedMongoProject(normalized) ? normalized.id : '');
+  return sourceId ? `${sourceId}:${signature}` : `${projectTitleBase(normalized).toLowerCase()}:${signature}`;
+}
+
+function projectDraftDuplicateKey(project) {
+  const normalized = normalizeProject(project);
+  return `${projectTitleBase(normalized).toLowerCase()}:${projectDataSignature(normalized)}`;
+}
+
 function uniqueProjects(projects) {
   const seen = new Set();
   return projects.filter((project) => {
     const normalized = normalizeProject(project);
-    const key = `${normalized.id}:${projectDataSignature(normalized)}`;
+    const key = isDeviceDraft(normalized) ? projectDraftDuplicateKey(normalized) : projectIdentityKey(normalized);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -468,12 +485,56 @@ function uniqueProjects(projects) {
 
 function findDeviceDrafts(localProjects, cloudProjects) {
   const cloudSignatures = new Map(cloudProjects.map((project) => [project.id, projectDataSignature(project)]));
+  const cloudSignatureSet = new Set(cloudProjects.map(projectDataSignature));
+  const seenDrafts = new Set();
   return uniqueProjects(
     localProjects
       .filter(projectHasUserData)
-      .filter((project) => isDeviceDraft(project) || cloudSignatures.get(project.id) !== projectDataSignature(project))
+      .filter((project) => {
+        const normalized = normalizeProject(project);
+        const signature = projectDataSignature(normalized);
+        const originalProjectId = normalized.originalProjectId && !normalized.originalProjectId.startsWith('local-') ? normalized.originalProjectId : '';
+        const matchingCloudSignature = cloudSignatures.get(originalProjectId || normalized.id);
+        if (matchingCloudSignature === signature || cloudSignatureSet.has(signature)) return false;
+        return isDeviceDraft(normalized) || cloudSignatures.get(normalized.id) !== signature;
+      })
       .map(asDeviceDraft)
+      .filter((project) => {
+        const key = projectDraftDuplicateKey(project);
+        if (seenDrafts.has(key)) return false;
+        seenDrafts.add(key);
+        return true;
+      })
   ).map(normalizeProject);
+}
+
+function uniqueDeviceDrafts(projects) {
+  const seen = new Set();
+  return projects.filter((project) => {
+    const key = projectDraftDuplicateKey(project);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function removeSyncedDeviceDraftBackups(projects) {
+  const syncedKeys = new Set(projects.map(projectIdentityKey));
+  if (!syncedKeys.size) return;
+
+  try {
+    const existing = JSON.parse(localStorage.getItem(archiveBackupStorageKey) || '[]');
+    const backups = Array.isArray(existing) ? existing : [];
+    const cleaned = backups
+      .map((backup) => ({
+        ...backup,
+        projects: (Array.isArray(backup.projects) ? backup.projects : []).filter((project) => !syncedKeys.has(projectIdentityKey(project))),
+      }))
+      .filter((backup) => backup.projects.length);
+    localStorage.setItem(archiveBackupStorageKey, JSON.stringify(cleaned));
+  } catch {
+    // Best effort cleanup only.
+  }
 }
 
 function refreshReceiptQueue() {
@@ -784,24 +845,37 @@ function loadLocalArchive() {
 }
 
 function preserveDeviceDrafts(projects) {
-  const drafts = projects.filter(projectHasUserData).map(asDeviceDraft);
+  const drafts = uniqueDeviceDrafts(projects.filter(projectHasUserData).map(asDeviceDraft));
   if (!drafts.length) return;
 
   const existing = JSON.parse(localStorage.getItem(archiveBackupStorageKey) || '[]');
   const backups = Array.isArray(existing) ? existing : [];
+  const existingDrafts = backups.flatMap((backup) => (Array.isArray(backup.projects) ? backup.projects : []));
+  const newDrafts = uniqueDeviceDrafts([...drafts, ...existingDrafts]).slice(0, 20);
   backups.unshift({
     savedAt: new Date().toISOString(),
-    projects: drafts,
+    projects: newDrafts,
   });
-  localStorage.setItem(archiveBackupStorageKey, JSON.stringify(backups.slice(0, 10)));
+  localStorage.setItem(
+    archiveBackupStorageKey,
+    JSON.stringify(
+      backups
+        .map((backup, index) => (index === 0 ? backup : { ...backup, projects: uniqueDeviceDrafts(backup.projects || []) }))
+        .filter((backup) => backup.projects.length)
+        .slice(0, 5)
+    )
+  );
 }
 
 function persistLocalArchive(updateStatus = true) {
   try {
     const existing = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
     const existingProjects = Array.isArray(existing.projects) ? existing.projects : [];
-    const currentSignatures = new Set(state.projects.map((project) => `${project.id}:${projectDataSignature(project)}`));
-    const draftsToPreserve = existingProjects.filter((project) => projectHasUserData(project) && !currentSignatures.has(`${project.id}:${projectDataSignature(project)}`));
+    const currentKeys = new Set(state.projects.map(projectIdentityKey));
+    const currentSignatures = new Set(state.projects.map(projectDataSignature));
+    const draftsToPreserve = existingProjects.filter(
+      (project) => projectHasUserData(project) && !currentKeys.has(projectIdentityKey(project)) && !currentSignatures.has(projectDataSignature(project))
+    );
     preserveDeviceDrafts(draftsToPreserve);
   } catch {
     // Best effort backup only.
@@ -1133,14 +1207,14 @@ async function saveDetailsToMongo() {
 }
 
 async function syncLocalProjectsToCloud() {
-  const localProjects = deviceDraftProjects();
+  const localProjects = uniqueDeviceDrafts(deviceDraftProjects());
   if (!localProjects.length) return;
 
   state.syncingLocal = true;
   try {
     const replacements = new Map();
     for (const project of localProjects) {
-      const title = (project.title || projectTitle(project)).replace(/\s+\(device draft\)$/, '');
+      const title = projectTitleBase(project);
       const targetId = project.originalProjectId && !project.originalProjectId.startsWith('local-') ? project.originalProjectId : '';
       let saved;
       if (targetId) {
@@ -1169,14 +1243,21 @@ async function syncLocalProjectsToCloud() {
     }
 
     const currentId = state.currentProject?.id || '';
-    state.projects = state.projects.map((project) => replacements.get(project.id) || project);
+    const syncedDraftIds = new Set(localProjects.map((project) => project.id));
+    const replacementProjects = [...replacements.values()];
+    state.projects = uniqueProjects([
+      ...replacementProjects,
+      ...state.projects.filter((project) => !syncedDraftIds.has(project.id) && !replacementProjects.some((replacement) => replacement.id === project.id)),
+    ]).map(normalizeProject);
+    removeSyncedDeviceDraftBackups([...localProjects, ...replacementProjects]);
     const replacement = replacements.get(currentId);
     if (replacement) {
       await openProject(replacement.id);
     } else {
       saveLocalArchive();
     }
-    state.error = 'Local projects synced to cloud. You can now open this app from another device.';
+    state.error = 'Device drafts synced to cloud and duplicate local copies were cleaned up.';
+    state.recoveryStatus = '';
   } catch (error) {
     state.error = `Local project sync failed: ${error.message}`;
   } finally {
