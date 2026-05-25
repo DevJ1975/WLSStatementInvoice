@@ -430,6 +430,9 @@ h3 {
 
 .dashboard-grid article,
 .dashboard-panel {
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 140px;
   border: 1px solid #d8e0e4;
   border-radius: 8px;
   padding: 16px;
@@ -497,6 +500,9 @@ h3 {
   position: relative;
   display: grid;
   gap: 16px;
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 792px;
   max-width: 100%;
   overflow: hidden;
   min-height: 792px;
@@ -657,6 +663,9 @@ h3 {
 .archive-list article {
   display: grid;
   gap: 12px;
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 220px;
   border: 1px solid #c8d1d6;
   border-radius: 8px;
   padding: 16px;
@@ -1004,6 +1013,9 @@ h3 {
 }
 
 .receipt-grid article {
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 230px;
   border: 1px solid #d8e0e4;
   border-radius: 8px;
   padding: 10px;

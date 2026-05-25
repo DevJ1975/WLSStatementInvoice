@@ -1,7 +1,5 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
@@ -36,6 +34,7 @@ const pdfLogoHeight = 56;
 const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
 const autosaveDelayMs = 900;
+const localArchiveDelayMs = 500;
 
 const state = reactive({
   loading: true,
@@ -109,9 +108,12 @@ const mileageForm = reactive({
 const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
 let gpsTimer = null;
 let autosaveTimer = null;
+let localArchiveTimer = null;
 const addressTimers = {};
 let routeMap = null;
 let routeLayer = null;
+let leafletApi = null;
+let leafletLoader = null;
 
 const data = computed(() => state.currentProject?.data || blankProjectData());
 const meta = computed(() => data.value.meta);
@@ -466,7 +468,7 @@ function preserveDeviceDrafts(projects) {
   localStorage.setItem(archiveBackupStorageKey, JSON.stringify(backups.slice(0, 10)));
 }
 
-function saveLocalArchive() {
+function persistLocalArchive(updateStatus = true) {
   try {
     const existing = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
     const existingProjects = Array.isArray(existing.projects) ? existing.projects : [];
@@ -484,8 +486,40 @@ function saveLocalArchive() {
       currentProjectId: state.currentProject?.id || '',
     })
   );
-  state.lastSavedAt = new Date().toISOString();
-  state.lastSaveStatus = state.storage === 'mongodb' ? 'Cached locally' : 'Saved locally';
+  if (updateStatus) {
+    state.lastSavedAt = new Date().toISOString();
+    state.lastSaveStatus = state.storage === 'mongodb' ? 'Cached locally' : 'Saved locally';
+  }
+}
+
+function flushLocalArchive(updateStatus = true) {
+  if (localArchiveTimer) {
+    clearTimeout(localArchiveTimer);
+    localArchiveTimer = null;
+  }
+  persistLocalArchive(updateStatus);
+}
+
+function flushLocalArchiveBeforeUnload() {
+  flushLocalArchive(false);
+}
+
+function saveLocalArchive(options = {}) {
+  const config = options && typeof options === 'object' ? options : {};
+  if (config.defer) {
+    if (localArchiveTimer) clearTimeout(localArchiveTimer);
+    if (config.updateStatus !== false) {
+      state.lastSavedAt = new Date().toISOString();
+      state.lastSaveStatus = state.storage === 'mongodb' ? 'Cached locally' : 'Saved locally';
+    }
+    localArchiveTimer = setTimeout(() => {
+      localArchiveTimer = null;
+      persistLocalArchive(config.updateStatus !== false);
+    }, localArchiveDelayMs);
+    return;
+  }
+
+  flushLocalArchive(config.updateStatus !== false);
 }
 
 async function apiJson(path, options = {}) {
@@ -624,7 +658,6 @@ async function saveCurrentProject(options = {}) {
   state.currentProject.updatedAt = new Date().toISOString();
   const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
   if (index >= 0) state.projects[index] = state.currentProject;
-  saveLocalArchive();
 
   if (config.requireCloud && isDeviceDraft(state.currentProject)) {
     await saveDeviceDraftToMongo(config);
@@ -633,6 +666,7 @@ async function saveCurrentProject(options = {}) {
 
   const shouldAttemptCloud = (state.storage === 'mongodb' || isPersistedMongoProject(state.currentProject)) && !isDeviceDraft(state.currentProject);
   if (!shouldAttemptCloud) {
+    saveLocalArchive({ defer: Boolean(config.autosave) });
     if (config.requireCloud) {
       state.error = 'Saved on this device. Cloud save is unavailable right now.';
       state.lastSaveStatus = 'Saved locally';
@@ -672,12 +706,13 @@ async function saveCurrentProject(options = {}) {
     state.currentProject = normalizeProject(payload.project);
     state.storage = 'mongodb';
     state.error = '';
-    saveLocalArchive();
+    saveLocalArchive({ updateStatus: false });
     state.lastSavedAt = new Date().toISOString();
     state.lastSaveStatus = successStatus;
     state.saveNotice = `${successStatus} at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
     if (!isPersistedMongoProject(state.currentProject)) state.storage = 'local';
+    saveLocalArchive({ updateStatus: false });
     state.error = `Saved locally only. MongoDB save failed: ${error.message}`;
     state.lastSaveStatus = 'MongoDB save failed';
     state.saveNotice = 'MongoDB save failed. Changes are cached on this device.';
@@ -733,11 +768,12 @@ async function saveDeviceDraftToMongo(config = {}) {
     state.storage = 'mongodb';
     state.error = '';
     refreshReceiptQueue();
-    saveLocalArchive();
+    saveLocalArchive({ updateStatus: false });
     state.lastSavedAt = new Date().toISOString();
     state.lastSaveStatus = 'Saved successfully';
     state.saveNotice = `Saved successfully at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
+    saveLocalArchive({ updateStatus: false });
     state.error = `Saved locally only. Cloud save failed: ${error.message}`;
     state.lastSaveStatus = 'Cloud save failed';
     state.saveNotice = 'Cloud save failed. Changes are cached on this device.';
@@ -1981,8 +2017,19 @@ function rowRoutePoints(row) {
   return row.routePoints || [];
 }
 
+async function loadLeaflet() {
+  if (leafletApi) return leafletApi;
+  if (!leafletLoader) {
+    leafletLoader = Promise.all([import('leaflet'), import('leaflet/dist/leaflet.css')]).then(([module]) => {
+      leafletApi = module.default || module;
+      return leafletApi;
+    });
+  }
+  return leafletLoader;
+}
+
 function routePinIcon(label, color) {
-  return L.divIcon({
+  return leafletApi.divIcon({
     className: 'route-pin-icon',
     html: `<span style="background:${color}">${label}</span>`,
     iconSize: [28, 28],
@@ -1990,8 +2037,9 @@ function routePinIcon(label, color) {
   });
 }
 
-function ensureRouteMap() {
+async function ensureRouteMap() {
   if (!routeMapEl.value || routeMap) return;
+  const L = await loadLeaflet();
   routeMap = L.map(routeMapEl.value, {
     zoomControl: true,
     scrollWheelZoom: false,
@@ -2008,7 +2056,8 @@ async function renderRouteMap() {
   if (state.tab !== 'mileage') return;
   await nextTick();
   if (!routeMapEl.value) return;
-  ensureRouteMap();
+  await ensureRouteMap();
+  if (!routeLayer || !routeMap || !leafletApi) return;
   routeLayer.clearLayers();
 
   const points = displayedRoutePoints.value;
@@ -2020,12 +2069,12 @@ async function renderRouteMap() {
 
   const latLngs = points.map((point) => [point.lat, point.lng]);
   if (latLngs.length === 1) {
-    L.marker(latLngs[0], { icon: routePinIcon('S', '#4b5a60') }).addTo(routeLayer);
+    leafletApi.marker(latLngs[0], { icon: routePinIcon('S', '#4b5a60') }).addTo(routeLayer);
     routeMap.setView(latLngs[0], 15);
   } else {
-    L.polyline(latLngs, { color: '#846268', weight: 5, opacity: 0.9 }).addTo(routeLayer);
-    L.marker(latLngs[0], { icon: routePinIcon('S', '#4b5a60') }).addTo(routeLayer);
-    L.marker(latLngs[latLngs.length - 1], { icon: routePinIcon('E', '#846268') }).addTo(routeLayer);
+    leafletApi.polyline(latLngs, { color: '#846268', weight: 5, opacity: 0.9 }).addTo(routeLayer);
+    leafletApi.marker(latLngs[0], { icon: routePinIcon('S', '#4b5a60') }).addTo(routeLayer);
+    leafletApi.marker(latLngs[latLngs.length - 1], { icon: routePinIcon('E', '#846268') }).addTo(routeLayer);
     routeMap.fitBounds(latLngs, { padding: [24, 24], maxZoom: 17 });
   }
 
@@ -2259,11 +2308,16 @@ watch(
   { flush: 'post' }
 );
 
-onMounted(initializeSecurity);
+onMounted(() => {
+  window.addEventListener('beforeunload', flushLocalArchiveBeforeUnload);
+  initializeSecurity();
+});
 onBeforeUnmount(() => {
+  flushLocalArchive(false);
   clearAutosaveTimer();
   stopGpsTripWatcher();
   revokeReceiptPreview();
+  window.removeEventListener('beforeunload', flushLocalArchiveBeforeUnload);
   if (routeMap) {
     routeMap.remove();
     routeMap = null;

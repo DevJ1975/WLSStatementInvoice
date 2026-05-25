@@ -1,4 +1,4 @@
-const cacheName = 'wls-expense-invoice-v3';
+const cacheName = 'wls-expense-invoice-v4';
 const shellAssets = ['/', '/manifest.webmanifest', '/wls-logo.jpg', '/wls-icon-192.png', '/wls-icon-512.png'];
 
 self.addEventListener('install', (event) => {
