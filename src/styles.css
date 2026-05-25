@@ -64,6 +64,17 @@ button.danger {
   color: #7a2731;
 }
 
+button.sync-cloud-button {
+  border: 1px solid #056f4f;
+  background: #087f5b;
+  color: white;
+  box-shadow: 0 8px 18px rgb(8 127 91 / 22%);
+}
+
+button.sync-cloud-button:not(:disabled):hover {
+  background: #066b4d;
+}
+
 input,
 select,
 textarea {

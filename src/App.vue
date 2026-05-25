@@ -1492,8 +1492,8 @@ onBeforeUnmount(() => {
     <section v-else-if="state.tab === 'archive'" class="archive-view">
       <div class="archive-toolbar">
         <h2>Project archive</h2>
-        <button v-if="state.storage === 'mongodb' && localProjectCount" class="secondary" type="button" :disabled="state.syncingLocal" @click="syncLocalProjectsToCloud">
-          {{ state.syncingLocal ? 'Syncing...' : `Sync ${localProjectCount} local to cloud` }}
+        <button v-if="state.storage === 'mongodb' && localProjectCount" class="sync-cloud-button" type="button" :disabled="state.syncingLocal" @click="syncLocalProjectsToCloud">
+          {{ state.syncingLocal ? 'Syncing device drafts...' : `Sync ${localProjectCount} device draft${localProjectCount === 1 ? '' : 's'} to cloud` }}
         </button>
         <button type="button" @click="createProject()">New project</button>
       </div>
