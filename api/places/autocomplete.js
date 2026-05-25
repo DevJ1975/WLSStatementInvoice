@@ -48,12 +48,15 @@ module.exports = async function handler(req, res) {
       return;
     }
 
+    const country = (getQuery(req, 'country') || '').trim().toLowerCase();
     const url = new URL('https://api.geoapify.com/v1/geocode/autocomplete');
     url.searchParams.set('text', text);
     url.searchParams.set('format', 'json');
-    url.searchParams.set('filter', 'countrycode:us');
     url.searchParams.set('limit', '5');
     url.searchParams.set('apiKey', apiKey);
+    if (country) {
+      url.searchParams.set('filter', `countrycode:${country}`);
+    }
 
     const response = await fetch(url, {
       headers: {
