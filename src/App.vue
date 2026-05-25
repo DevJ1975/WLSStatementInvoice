@@ -33,6 +33,58 @@ const headerTimeFormatter = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
   second: '2-digit',
 });
+const usStateAbbreviations = {
+  alabama: 'AL',
+  alaska: 'AK',
+  arizona: 'AZ',
+  arkansas: 'AR',
+  california: 'CA',
+  colorado: 'CO',
+  connecticut: 'CT',
+  delaware: 'DE',
+  florida: 'FL',
+  georgia: 'GA',
+  hawaii: 'HI',
+  idaho: 'ID',
+  illinois: 'IL',
+  indiana: 'IN',
+  iowa: 'IA',
+  kansas: 'KS',
+  kentucky: 'KY',
+  louisiana: 'LA',
+  maine: 'ME',
+  maryland: 'MD',
+  massachusetts: 'MA',
+  michigan: 'MI',
+  minnesota: 'MN',
+  mississippi: 'MS',
+  missouri: 'MO',
+  montana: 'MT',
+  nebraska: 'NE',
+  nevada: 'NV',
+  'new hampshire': 'NH',
+  'new jersey': 'NJ',
+  'new mexico': 'NM',
+  'new york': 'NY',
+  'north carolina': 'NC',
+  'north dakota': 'ND',
+  ohio: 'OH',
+  oklahoma: 'OK',
+  oregon: 'OR',
+  pennsylvania: 'PA',
+  'rhode island': 'RI',
+  'south carolina': 'SC',
+  'south dakota': 'SD',
+  tennessee: 'TN',
+  texas: 'TX',
+  utah: 'UT',
+  vermont: 'VT',
+  virginia: 'VA',
+  washington: 'WA',
+  'west virginia': 'WV',
+  wisconsin: 'WI',
+  wyoming: 'WY',
+};
 const gpsAccuracyLimit = 250;
 const metersPerMile = 1609.344;
 const receiptImageTargetBytes = 900 * 1024;
@@ -238,6 +290,7 @@ const weatherText = computed(() => {
   if (state.header.weather.temperature === null) return 'Weather pending';
   return `${Math.round(state.header.weather.temperature)}°F ${state.header.weather.condition}`;
 });
+const reportAddressLines = computed(() => formatPostalAddressLines(report.value.address));
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -2082,6 +2135,90 @@ function formatPeriod() {
   return `${report.value.periodFrom || ''} - ${report.value.periodTo || ''}`;
 }
 
+function formatPostalAddressLines(value) {
+  const raw = String(value || '')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return [];
+
+  const zipMatch = raw.match(/\b\d{5}(?:-\d{4})?\b$/);
+  const zip = zipMatch?.[0] || '';
+  const withoutZip = zip ? raw.slice(0, zipMatch.index).replace(/[,\s]+$/, '') : raw;
+  const parts = withoutZip.split(',').map((part) => part.trim()).filter(Boolean);
+  let street = '';
+  let city = '';
+  let state = '';
+
+  if (parts.length >= 3) {
+    street = parts.slice(0, -2).join(', ');
+    city = parts.at(-2);
+    state = normalizeState(parts.at(-1));
+  } else if (parts.length === 2) {
+    street = parts[0];
+    const parsed = splitCityState(parts[1]);
+    city = parsed.city;
+    state = parsed.state;
+  } else {
+    const parsed = splitUnpunctuatedAddress(withoutZip);
+    street = parsed.street;
+    city = parsed.city;
+    state = parsed.state;
+  }
+
+  const cityState = [city, state].filter(Boolean).join(', ');
+  return [street || withoutZip, cityState, zip].filter(Boolean);
+}
+
+function splitCityState(value) {
+  const state = extractTrailingState(value);
+  if (!state) return { city: value.trim(), state: '' };
+  return {
+    city: value.slice(0, state.index).replace(/[,\s]+$/, ''),
+    state: state.abbreviation,
+  };
+}
+
+function splitUnpunctuatedAddress(value) {
+  const state = extractTrailingState(value);
+  if (!state) return { street: value, city: '', state: '' };
+
+  const beforeState = value.slice(0, state.index).trim();
+  const words = beforeState.split(/\s+/).filter(Boolean);
+  let cityWordCount = Math.min(2, words.length);
+  if (words.length >= 3 && words.at(-2)?.toLowerCase() === 'of') cityWordCount = 3;
+  const cityWords = words.slice(-cityWordCount);
+  const streetWords = words.slice(0, -cityWordCount);
+  return {
+    street: streetWords.join(' ') || beforeState,
+    city: streetWords.length ? cityWords.join(' ') : '',
+    state: state.abbreviation,
+  };
+}
+
+function extractTrailingState(value) {
+  const source = value.trim();
+  const abbreviations = Object.values(usStateAbbreviations);
+  const stateNames = Object.keys(usStateAbbreviations).sort((a, b) => b.length - a.length);
+
+  for (const abbreviation of abbreviations) {
+    const match = source.match(new RegExp(`\\b${abbreviation}\\.?$`, 'i'));
+    if (match) return { abbreviation, index: match.index };
+  }
+
+  for (const name of stateNames) {
+    const match = source.match(new RegExp(`\\b${name}$`, 'i'));
+    if (match) return { abbreviation: usStateAbbreviations[name], index: match.index };
+  }
+
+  return null;
+}
+
+function normalizeState(value = '') {
+  const clean = value.toLowerCase().replace(/\./g, '').trim();
+  return usStateAbbreviations[clean] || value.trim().toUpperCase();
+}
+
 function formatDateRange(from, to) {
   if (from && to) return `${from} - ${to}`;
   return from || to || '';
@@ -3611,7 +3748,7 @@ onBeforeUnmount(() => {
           <div class="statement-meta print-meta">
             <div>
               <strong>{{ report.employeeName || 'Employee' }}</strong>
-              <span>{{ report.address }}</span>
+              <span v-for="line in reportAddressLines" :key="`print-address-${line}`">{{ line }}</span>
               <span>{{ report.phone }}</span>
               <span>{{ report.email }}</span>
             </div>
@@ -3872,7 +4009,7 @@ onBeforeUnmount(() => {
         <div class="statement-meta">
           <div>
             <strong>{{ report.employeeName }}</strong>
-            <span>{{ report.address }}</span>
+            <span v-for="line in reportAddressLines" :key="`statement-address-${line}`">{{ line }}</span>
             <span>{{ report.employeeId }}</span>
             <span>{{ report.phone }}</span>
             <span>{{ report.email }}</span>
