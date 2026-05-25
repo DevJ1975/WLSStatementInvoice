@@ -23,6 +23,8 @@ test('normalizeProjectData fills missing sections and preserves valid arrays', (
   assert.equal(normalized.report.employeeName, 'Jamil Jones');
   assert.equal(normalized.report.reportNo, '35-SK');
   assert.equal(normalized.report.phone, '');
+  assert.equal(normalized.report.onsiteDescription, 'Onsite work');
+  assert.equal(normalized.report.remoteDescription, 'Remote work');
   assert.equal(normalized.meta.clientName, '');
   assert.deepEqual(normalized.expenseRows, [{ id: 'expense-1', amount: 42 }]);
   assert.deepEqual(normalized.mileageRows, []);

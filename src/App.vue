@@ -97,7 +97,39 @@ let routeLayer = null;
 const data = computed(() => state.currentProject?.data || blankProjectData());
 const meta = computed(() => data.value.meta);
 const report = computed(() => data.value.report);
-const laborTotal = computed(() => Number(report.value.laborDays || 0) * Number(report.value.dailyRate || 0));
+const statementLaborRows = computed(() => {
+  const rows = [
+    {
+      label: 'Onsite Work',
+      date: formatDateRange(report.value.onsiteFrom, report.value.onsiteTo),
+      description: report.value.onsiteDescription || 'Onsite work',
+      days: Number(report.value.onsiteDays || 0),
+      rate: Number(report.value.onsiteRate || 0),
+    },
+    {
+      label: 'Remote Work',
+      date: formatDateRange(report.value.remoteFrom, report.value.remoteTo),
+      description: report.value.remoteDescription || 'Remote work',
+      days: Number(report.value.remoteDays || 0),
+      rate: Number(report.value.remoteRate || 0),
+    },
+  ];
+  const hasNewRows = rows.some((row) => row.date || row.days || row.rate || (row.description && !['Onsite work', 'Remote work'].includes(row.description)));
+  const hasLegacyLabor = Boolean(report.value.laborDescription || Number(report.value.laborDays || 0) || Number(report.value.dailyRate || 0));
+  if (!hasNewRows && hasLegacyLabor) {
+    return [
+      {
+        label: report.value.laborTitle || 'Labor',
+        date: formatPeriod(),
+        description: report.value.laborDescription,
+        days: Number(report.value.laborDays || 0),
+        rate: Number(report.value.dailyRate || 0),
+      },
+    ];
+  }
+  return rows;
+});
+const laborTotal = computed(() => statementLaborRows.value.reduce((sum, row) => sum + Number(row.days || 0) * Number(row.rate || 0), 0));
 const expenseTotal = computed(() => data.value.expenseRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
 const mileageTotal = computed(() => data.value.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0) * Number(row.rate || 0), 0));
 const totalMiles = computed(() => data.value.mileageRows.reduce((sum, row) => sum + Number(row.miles || 0), 0));
@@ -173,6 +205,16 @@ function blankProjectData() {
       laborDescription: '',
       laborDays: 0,
       dailyRate: 0,
+      onsiteFrom: '',
+      onsiteTo: '',
+      onsiteDescription: 'Onsite work',
+      onsiteDays: 0,
+      onsiteRate: 0,
+      remoteFrom: '',
+      remoteTo: '',
+      remoteDescription: 'Remote work',
+      remoteDays: 0,
+      remoteRate: 0,
     },
     expenseRows: [],
     mileageRows: [],
@@ -1103,6 +1145,11 @@ function formatPeriod() {
   return `${report.value.periodFrom || ''} - ${report.value.periodTo || ''}`;
 }
 
+function formatDateRange(from, to) {
+  if (from && to) return `${from} - ${to}`;
+  return from || to || '';
+}
+
 async function handleReceiptFile(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -1659,9 +1706,9 @@ async function exportPdf(includeReceipts = false) {
   doc.text(projectTitle(), 42, 74);
   autoTable(doc, {
     startY: 92,
-    head: [['Date', 'Description', '# of Days', 'Daily Rate', 'Total']],
+    head: [['Date Range', 'Description', '# of Days', 'Daily Rate', 'Total']],
     body: [
-      [formatPeriod(), report.value.laborDescription, report.value.laborDays, money.format(Number(report.value.dailyRate || 0)), money.format(laborTotal.value)],
+      ...statementLaborRows.value.map((row) => [row.date, row.description, row.days, money.format(row.rate), money.format(row.days * row.rate)]),
       ['', 'Expenses', '', '', money.format(expenseTotal.value)],
       ['', `Mileage (${number.format(totalMiles.value)} mi)`, '', '', money.format(mileageTotal.value)],
       ['', 'Total expenses', '', '', money.format(expenseTotal.value + mileageTotal.value)],
@@ -1977,10 +2024,29 @@ onBeforeUnmount(() => {
         <input v-model="report.engagement" placeholder="Engagement" />
         <textarea v-model="meta.notes" placeholder="Project notes"></textarea>
         <input v-model="report.laborTitle" placeholder="Labor title" />
-        <input v-model="report.laborDescription" placeholder="Labor description" />
-        <div class="inline-fields compact">
-          <input v-model.number="report.laborDays" type="number" min="0" step="0.5" placeholder="Days" />
-          <input v-model.number="report.dailyRate" type="number" min="0" step="0.01" placeholder="Daily rate" />
+        <div class="labor-entry">
+          <h3>Onsite Work</h3>
+          <div class="inline-fields">
+            <input v-model="report.onsiteFrom" type="date" />
+            <input v-model="report.onsiteTo" type="date" />
+          </div>
+          <input v-model="report.onsiteDescription" placeholder="Onsite work description" />
+          <div class="inline-fields compact">
+            <input v-model.number="report.onsiteDays" type="number" min="0" step="0.5" placeholder="Onsite days" />
+            <input v-model.number="report.onsiteRate" type="number" min="0" step="0.01" placeholder="Onsite daily rate" />
+          </div>
+        </div>
+        <div class="labor-entry">
+          <h3>Remote Work</h3>
+          <div class="inline-fields">
+            <input v-model="report.remoteFrom" type="date" />
+            <input v-model="report.remoteTo" type="date" />
+          </div>
+          <input v-model="report.remoteDescription" placeholder="Remote work description" />
+          <div class="inline-fields compact">
+            <input v-model.number="report.remoteDays" type="number" min="0" step="0.5" placeholder="Remote days" />
+            <input v-model.number="report.remoteRate" type="number" min="0" step="0.01" placeholder="Remote daily rate" />
+          </div>
         </div>
         <button type="submit">Save details</button>
       </form>
@@ -2011,14 +2077,14 @@ onBeforeUnmount(() => {
         <div class="engagement-band">{{ report.engagement }}</div>
         <div class="labor-band">{{ report.laborTitle }}</div>
         <table class="sheet-table statement-table">
-          <thead><tr><th>Date</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr></thead>
+          <thead><tr><th>Date Range</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr></thead>
           <tbody>
-            <tr>
-              <td>{{ formatPeriod() }}</td>
-              <td>{{ report.laborDescription }}</td>
-              <td>{{ report.laborDays }}</td>
-              <td>{{ money.format(Number(report.dailyRate || 0)) }}</td>
-              <td>{{ money.format(laborTotal) }}</td>
+            <tr v-for="row in statementLaborRows" :key="row.label">
+              <td>{{ row.date }}</td>
+              <td>{{ row.description }}</td>
+              <td>{{ row.days }}</td>
+              <td>{{ money.format(row.rate) }}</td>
+              <td>{{ money.format(row.days * row.rate) }}</td>
             </tr>
             <tr><td></td><td>Expenses</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
             <tr><td></td><td>Mileage ({{ number.format(totalMiles) }} mi)</td><td></td><td></td><td>{{ money.format(mileageTotal) }}</td></tr>
