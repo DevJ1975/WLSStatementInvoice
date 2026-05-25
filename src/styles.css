@@ -97,6 +97,22 @@ main {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+.pin-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.pin-gate form {
+  width: min(420px, 100%);
+}
+
+.pin-gate img {
+  width: 140px;
+  height: auto;
+}
+
 form {
   display: grid;
   gap: 12px;
@@ -241,6 +257,48 @@ h3 {
     max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
 }
 
+.dashboard-view {
+  display: grid;
+  gap: 16px;
+  padding:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    48px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-grid article,
+.dashboard-panel {
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  padding: 16px;
+  background: white;
+  box-shadow: 0 10px 24px rgb(23 32 42 / 7%);
+}
+
+.dashboard-grid article {
+  display: grid;
+  gap: 8px;
+}
+
+.dashboard-grid span {
+  color: #627078;
+  font-size: 13px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dashboard-grid strong {
+  color: #17202a;
+  font-size: 26px;
+}
+
 .archive-toolbar {
   display: flex;
   align-items: center;
@@ -250,6 +308,10 @@ h3 {
 
 .archive-toolbar input {
   max-width: 420px;
+}
+
+.hidden-file {
+  display: none;
 }
 
 .sync-status {
@@ -550,6 +612,17 @@ h3 {
   font-weight: 800;
 }
 
+.receipt-queue {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #e2d4a7;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #fff9e7;
+  color: #624a10;
+  font-size: 13px;
+}
+
 .receipt-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -846,6 +919,7 @@ h3 {
   .app-header,
   .tabs,
   .archive-view,
+  .dashboard-view,
   .statement-grid,
   .workbook-view {
     padding-left: max(12px, env(safe-area-inset-left));

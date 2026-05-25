@@ -23,6 +23,7 @@ test('normalizeProjectData fills missing sections and preserves valid arrays', (
   assert.equal(normalized.report.employeeName, 'Jamil Jones');
   assert.equal(normalized.report.reportNo, '35-SK');
   assert.equal(normalized.report.phone, '');
+  assert.equal(normalized.meta.clientName, '');
   assert.deepEqual(normalized.expenseRows, [{ id: 'expense-1', amount: 42 }]);
   assert.deepEqual(normalized.mileageRows, []);
   assert.deepEqual(normalized.workLogs, []);
@@ -34,9 +35,11 @@ test('blankProjectData returns independent report and collection objects', () =>
   const second = blankProjectData();
 
   first.report.employeeName = 'Changed';
+  first.meta.clientName = 'Changed Client';
   first.expenseRows.push({ id: 'expense-1' });
 
   assert.equal(second.report.employeeName, '');
+  assert.equal(second.meta.clientName, '');
   assert.deepEqual(second.expenseRows, []);
 });
 
@@ -91,6 +94,7 @@ test('projectSummary and projectPayload expose normalized project fields', () =>
 
   const payload = projectPayload(project);
   assert.equal(payload.id, 'project-1');
+  assert.equal(payload.data.meta.clientName, '');
   assert.deepEqual(payload.data.expenseRows, [{ id: 'expense-1' }]);
   assert.deepEqual(payload.data.mileageRows, []);
   assert.deepEqual(payload.data.workLogs, []);

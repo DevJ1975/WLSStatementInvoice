@@ -5,9 +5,11 @@ import 'leaflet/dist/leaflet.css';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
+const pinHashStorageKey = 'wls-app-pin-hash-v1';
 const deviceDraftPrefix = 'device-draft-';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
 const tabs = [
+  ['dashboard', 'Dashboard'],
   ['archive', 'Archive'],
   ['statement', 'Statement'],
   ['expenses', 'Expense Report'],
@@ -31,14 +33,25 @@ const state = reactive({
   saving: false,
   storage: 'loading',
   error: '',
-  tab: 'archive',
+  tab: 'dashboard',
   projects: [],
   currentProject: null,
   syncingLocal: false,
   recoveryStatus: '',
+  lastSavedAt: '',
+  lastSaveStatus: 'Not saved yet',
+  duplicateWarning: '',
+  receiptQueue: [],
   receiptOcrRunning: false,
   receiptUploading: false,
   receiptDraft: emptyReceiptDraft(),
+  auth: {
+    checked: false,
+    unlocked: false,
+    hasPin: false,
+    pinInput: '',
+    pinError: '',
+  },
   gps: {
     active: false,
     watchId: null,
@@ -59,6 +72,7 @@ const state = reactive({
 });
 
 const routeMapEl = ref(null);
+const backupFileInput = ref(null);
 const expenseForm = reactive({ date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
 const mileageForm = reactive({
   date: '',
@@ -81,6 +95,7 @@ let routeMap = null;
 let routeLayer = null;
 
 const data = computed(() => state.currentProject?.data || blankProjectData());
+const meta = computed(() => data.value.meta);
 const report = computed(() => data.value.report);
 const laborTotal = computed(() => Number(report.value.laborDays || 0) * Number(report.value.dailyRate || 0));
 const expenseTotal = computed(() => data.value.expenseRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
@@ -92,6 +107,22 @@ const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value /
 const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
 const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => rowRoutePoints(row).length));
 const localProjectCount = computed(() => deviceDraftProjects().length);
+const dashboardStats = computed(() => {
+  const projects = state.projects || [];
+  return {
+    active: projects.filter((project) => project.status !== 'archived').length,
+    archived: projects.filter((project) => project.status === 'archived').length,
+    expenses: projects.reduce((sum, project) => sum + normalizeProject(project).data.expenseRows.reduce((rowSum, row) => rowSum + Number(row.amount || 0), 0), 0),
+    miles: projects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0), 0), 0),
+    mileage: projects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0) * Number(row.rate || 0), 0), 0),
+    hours: projects.reduce((sum, project) => sum + normalizeProject(project).data.workLogs.reduce((rowSum, row) => rowSum + Number(row.hours || 0), 0), 0),
+  };
+});
+const syncStatusText = computed(() => {
+  if (state.saving) return 'Saving...';
+  if (state.storage === 'mongodb') return state.lastSavedAt ? `Cloud saved ${formatDateTime(state.lastSavedAt)}` : 'Cloud sync active';
+  return state.lastSavedAt ? `Saved on this device ${formatDateTime(state.lastSavedAt)}` : 'Local fallback';
+});
 const selectedMileageRoute = computed(() => {
   if (state.gps.selectedMileageId === 'draft-route') return null;
   return routeMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || routeMileageRows.value[0] || null;
@@ -117,6 +148,16 @@ function newId() {
 
 function blankProjectData() {
   return {
+    meta: {
+      clientName: '',
+      jobNumber: '',
+      siteName: '',
+      poNumber: '',
+      invoiceNumber: '',
+      billingContact: '',
+      billingEmail: '',
+      notes: '',
+    },
     report: {
       employeeName: '',
       address: '',
@@ -219,6 +260,7 @@ function normalizeProjectData(sourceData) {
   const blank = blankProjectData();
   const source = sourceData && typeof sourceData === 'object' ? sourceData : {};
   return {
+    meta: { ...blank.meta, ...(source.meta || {}) },
     report: { ...blank.report, ...(source.report || {}) },
     expenseRows: Array.isArray(source.expenseRows) ? source.expenseRows : [],
     mileageRows: Array.isArray(source.mileageRows) ? source.mileageRows.map(normalizeMileageRow) : [],
@@ -300,6 +342,18 @@ function findDeviceDrafts(localProjects, cloudProjects) {
   ).map(normalizeProject);
 }
 
+function refreshReceiptQueue() {
+  state.receiptQueue = (state.currentProject?.data?.receipts || [])
+    .filter((receipt) => receipt.pendingUpload)
+    .map((receipt) => ({
+      id: receipt.id,
+      vendor: receipt.vendor || 'Receipt',
+      amount: Number(receipt.amount || 0),
+      reason: receipt.pendingReason || 'Pending cloud upload',
+      createdAt: receipt.createdAt || '',
+    }));
+}
+
 function projectTitle(project = state.currentProject) {
   if (!project) return 'Untitled expense project';
   const projectReport = project.data?.report || {};
@@ -365,6 +419,8 @@ function saveLocalArchive() {
       currentProjectId: state.currentProject?.id || '',
     })
   );
+  state.lastSavedAt = new Date().toISOString();
+  state.lastSaveStatus = state.storage === 'mongodb' ? 'Cached locally' : 'Saved locally';
 }
 
 async function apiJson(path, options = {}) {
@@ -412,6 +468,7 @@ async function loadProjects() {
   } catch {
     state.projects = localArchive.projects.length ? localArchive.projects : [blankProject()];
     state.currentProject = state.projects.find((project) => project.id === localArchive.currentProjectId) || state.projects[0];
+    refreshReceiptQueue();
     state.storage = 'local';
     state.error = 'Using local fallback. MongoDB sync is unavailable in this session.';
     saveLocalArchive();
@@ -462,11 +519,13 @@ async function openProject(id) {
     state.currentProject = normalizeProject(payload.project);
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
     if (index >= 0) state.projects[index] = { ...state.projects[index], ...state.currentProject };
+    refreshReceiptQueue();
     saveLocalArchive();
     return;
   }
 
   state.currentProject = state.projects.find((project) => project.id === id) || state.projects[0];
+  refreshReceiptQueue();
   saveLocalArchive();
 }
 
@@ -492,6 +551,8 @@ async function saveCurrentProject() {
     state.currentProject = normalizeProject(payload.project);
     state.error = '';
     saveLocalArchive();
+    state.lastSavedAt = new Date().toISOString();
+    state.lastSaveStatus = 'Cloud saved';
   } catch {
     state.storage = 'local';
     state.error = 'Saved locally only. MongoDB sync is unavailable in this session.';
@@ -549,6 +610,51 @@ async function syncLocalProjectsToCloud() {
     state.error = `Local project sync failed: ${error.message}`;
   } finally {
     state.syncingLocal = false;
+  }
+}
+
+function backupFileName() {
+  const stamp = new Date().toISOString().slice(0, 10);
+  return `wls-project-backup-${stamp}.json`;
+}
+
+function exportJsonBackup() {
+  const payload = {
+    app: 'WLS Expense & Invoice Tracker',
+    exportedAt: new Date().toISOString(),
+    storage: state.storage,
+    projects: state.projects.map(normalizeProject),
+    currentProjectId: state.currentProject?.id || '',
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = backupFileName();
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function openBackupImport() {
+  backupFileInput.value?.click();
+}
+
+async function importJsonBackup(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    const importedProjects = Array.isArray(payload.projects) ? payload.projects.map(asDeviceDraft) : [];
+    if (!importedProjects.length) throw new Error('No projects found in backup.');
+    const cloudProjects = state.projects.filter((project) => !isDeviceDraft(project));
+    state.projects = uniqueProjects([...cloudProjects, ...importedProjects]).map(normalizeProject);
+    state.currentProject = importedProjects[0];
+    state.recoveryStatus = `${importedProjects.length} backup project${importedProjects.length === 1 ? '' : 's'} imported as device drafts. Sync them to cloud when ready.`;
+    saveLocalArchive();
+  } catch (error) {
+    state.error = `Backup import failed: ${error.message}`;
+  } finally {
+    event.target.value = '';
   }
 }
 
@@ -616,22 +722,48 @@ async function resetToBlankTemplate() {
   await saveCurrentProject();
 }
 
+function warnDuplicateExpense(row) {
+  const duplicate = data.value.expenseRows.find(
+    (item) =>
+      item.date === row.date &&
+      item.vendor?.trim().toLowerCase() === row.vendor?.trim().toLowerCase() &&
+      Number(item.amount || 0) === Number(row.amount || 0)
+  );
+  state.duplicateWarning = duplicate ? 'Possible duplicate expense detected. Review the expense list before submitting again.' : '';
+  return Boolean(duplicate);
+}
+
+function warnDuplicateMileage(row) {
+  const duplicate = data.value.mileageRows.find(
+    (item) =>
+      item.date === row.date &&
+      item.from?.trim().toLowerCase() === row.from?.trim().toLowerCase() &&
+      item.to?.trim().toLowerCase() === row.to?.trim().toLowerCase() &&
+      Math.abs(Number(item.miles || 0) - Number(row.miles || 0)) < 0.01
+  );
+  state.duplicateWarning = duplicate ? 'Possible duplicate mileage row detected. Review the mileage list before submitting again.' : '';
+  return Boolean(duplicate);
+}
+
 async function addExpense() {
-  data.value.expenseRows.push({
+  const row = {
     id: newId(),
     date: expenseForm.date,
     vendor: expenseForm.vendor.trim(),
     description: expenseForm.description.trim(),
     category: expenseForm.category,
     amount: Number(expenseForm.amount || 0),
-  });
+  };
+  if (warnDuplicateExpense(row) && !window.confirm('This looks like a duplicate expense. Add it anyway?')) return;
+  data.value.expenseRows.push(row);
+  state.duplicateWarning = '';
   Object.assign(expenseForm, { date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
   await saveCurrentProject();
 }
 
 async function addMileage() {
   const isAddressRoute = mileageForm.calculationMode === 'address-route' && mileageForm.routeGeometry.length;
-  data.value.mileageRows.push({
+  const row = {
     id: newId(),
     trackingMode: 'manual',
     calculationMode: isAddressRoute ? 'address-route' : 'manual',
@@ -650,7 +782,10 @@ async function addMileage() {
     durationSeconds: isAddressRoute ? Number(mileageForm.routeDurationSeconds || 0) : 0,
     startLocation: '',
     endLocation: '',
-  });
+  };
+  if (warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
+  data.value.mileageRows.push(row);
+  state.duplicateWarning = '';
   resetMileageForm();
   await saveCurrentProject();
 }
@@ -1103,6 +1238,71 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatDateTime(value) {
+  if (!value) return '';
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+
+async function hashPin(pin) {
+  const bytes = new TextEncoder().encode(`wls-pin:${pin}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function initializeSecurity() {
+  state.auth.hasPin = Boolean(localStorage.getItem(pinHashStorageKey));
+  state.auth.unlocked = !state.auth.hasPin;
+  state.auth.checked = true;
+  if (state.auth.unlocked) {
+    await loadProjects();
+  } else {
+    state.loading = false;
+  }
+}
+
+async function unlockWithPin() {
+  state.auth.pinError = '';
+  const storedHash = localStorage.getItem(pinHashStorageKey);
+  if (!storedHash) {
+    state.auth.unlocked = true;
+    await loadProjects();
+    return;
+  }
+  if ((await hashPin(state.auth.pinInput)) !== storedHash) {
+    state.auth.pinError = 'Incorrect PIN.';
+    return;
+  }
+  state.auth.pinInput = '';
+  state.auth.unlocked = true;
+  await loadProjects();
+}
+
+async function setAppPin() {
+  const pin = window.prompt('Set a 4+ digit app PIN for this device');
+  if (!pin) return;
+  if (pin.trim().length < 4) {
+    state.error = 'PIN must be at least 4 digits.';
+    return;
+  }
+  localStorage.setItem(pinHashStorageKey, await hashPin(pin.trim()));
+  state.auth.hasPin = true;
+  state.auth.unlocked = true;
+  state.error = 'App PIN is set on this device.';
+}
+
+function clearAppPin() {
+  if (!window.confirm('Remove the app PIN on this device?')) return;
+  localStorage.removeItem(pinHashStorageKey);
+  state.auth.hasPin = false;
+  state.auth.unlocked = true;
+  state.error = 'App PIN removed on this device.';
+}
+
 function receiptCompressionText() {
   const original = state.receiptDraft.originalSize;
   const compressed = state.receiptDraft.compressedSize;
@@ -1137,7 +1337,7 @@ async function saveReceiptDraft() {
   state.receiptUploading = true;
 
   try {
-    if (state.storage === 'mongodb' && !state.currentProject.id.startsWith('local-')) {
+    if (state.storage === 'mongodb' && !isDeviceDraft(state.currentProject)) {
       const formData = new FormData();
       formData.append('receipt', state.receiptDraft.imageBlob, state.receiptDraft.fileName || 'receipt.jpg');
       formData.append(
@@ -1162,40 +1362,16 @@ async function saveReceiptDraft() {
       if (!response.ok) throw new Error(payload.error || 'Receipt upload failed.');
       state.currentProject = normalizeProject(payload.project);
     } else {
-      const receiptId = newId();
-      const expenseId = newId();
-      const imageDataUrl = await blobToDataUrl(state.receiptDraft.imageBlob);
-      data.value.receipts.push({
-        id: receiptId,
-        expenseId,
-        date: state.receiptDraft.date,
-        vendor: state.receiptDraft.vendor,
-        category: state.receiptDraft.category,
-        amount: Number(state.receiptDraft.amount || 0),
-        paymentMethod: state.receiptDraft.paymentMethod,
-        notes: state.receiptDraft.notes,
-        ocrText: state.receiptDraft.ocrText,
-        originalImageBytes: state.receiptDraft.originalSize,
-        storedImageBytes: state.receiptDraft.compressedSize,
-        imageDataUrl,
-        createdAt: new Date().toISOString(),
-      });
-      data.value.expenseRows.push({
-        id: expenseId,
-        date: state.receiptDraft.date,
-        vendor: state.receiptDraft.vendor,
-        description: state.receiptDraft.notes || 'Receipt expense',
-        category: state.receiptDraft.category,
-        amount: Number(state.receiptDraft.amount || 0),
-        receiptId,
-      });
-      await saveCurrentProject();
+      await addReceiptDraftLocally();
     }
 
     revokeReceiptPreview();
     state.receiptDraft = emptyReceiptDraft();
   } catch (error) {
-    state.error = error.message;
+    await addReceiptDraftLocally(error.message || 'Cloud upload failed.');
+    revokeReceiptPreview();
+    state.receiptDraft = emptyReceiptDraft();
+    state.error = 'Receipt saved on this device and queued because cloud upload failed.';
   } finally {
     state.receiptUploading = false;
   }
@@ -1220,6 +1396,51 @@ function receiptImageUrl(receipt) {
   if (receipt.imageDataUrl) return receipt.imageDataUrl;
   if (!state.currentProject || !receipt.imageFileId) return '';
   return `/api/projects/${state.currentProject.id}/receipts/${receipt.id}/image`;
+}
+
+async function addReceiptDraftLocally(reason = '') {
+  const receiptId = newId();
+  const expenseId = newId();
+  const imageDataUrl = await blobToDataUrl(state.receiptDraft.imageBlob);
+  const receipt = {
+    id: receiptId,
+    expenseId,
+    date: state.receiptDraft.date,
+    vendor: state.receiptDraft.vendor,
+    category: state.receiptDraft.category,
+    amount: Number(state.receiptDraft.amount || 0),
+    paymentMethod: state.receiptDraft.paymentMethod,
+    notes: state.receiptDraft.notes,
+    ocrText: state.receiptDraft.ocrText,
+    originalImageBytes: state.receiptDraft.originalSize,
+    storedImageBytes: state.receiptDraft.compressedSize,
+    imageDataUrl,
+    pendingUpload: Boolean(reason),
+    pendingReason: reason,
+    createdAt: new Date().toISOString(),
+  };
+  const expense = {
+    id: expenseId,
+    date: state.receiptDraft.date,
+    vendor: state.receiptDraft.vendor,
+    description: state.receiptDraft.notes || 'Receipt expense',
+    category: state.receiptDraft.category,
+    amount: Number(state.receiptDraft.amount || 0),
+    receiptId,
+  };
+  warnDuplicateExpense(expense);
+  data.value.receipts.push(receipt);
+  data.value.expenseRows.push(expense);
+  if (reason) {
+    state.receiptQueue.push({
+      id: receiptId,
+      vendor: receipt.vendor || 'Receipt',
+      amount: receipt.amount,
+      reason,
+      createdAt: receipt.createdAt,
+    });
+  }
+  await saveCurrentProject();
 }
 
 function rowRoutePoints(row) {
@@ -1470,7 +1691,7 @@ watch(
   { flush: 'post' }
 );
 
-onMounted(loadProjects);
+onMounted(initializeSecurity);
 onBeforeUnmount(() => {
   stopGpsTripWatcher();
   revokeReceiptPreview();
@@ -1484,6 +1705,24 @@ onBeforeUnmount(() => {
 
 <template>
   <main>
+    <section v-if="!state.auth.checked" class="pin-gate">
+      <form>
+        <img :src="logoUrl" alt="Workplace Learning System" />
+        <h2>Loading...</h2>
+      </form>
+    </section>
+
+    <section v-else-if="!state.auth.unlocked" class="pin-gate">
+      <form @submit.prevent="unlockWithPin">
+        <img :src="logoUrl" alt="Workplace Learning System" />
+        <h2>Enter app PIN</h2>
+        <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="PIN" />
+        <p v-if="state.auth.pinError" class="status-message gps-message">{{ state.auth.pinError }}</p>
+        <button type="submit">Unlock</button>
+      </form>
+    </section>
+
+    <template v-else>
     <header class="app-header">
       <div class="brand-lockup">
         <img :src="logoUrl" alt="Workplace Learning System" />
@@ -1493,8 +1732,10 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="header-actions">
-        <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB sync' : 'Local fallback' }}</span>
-        <span v-if="state.saving" class="mode-pill">Saving...</span>
+        <span class="mode-pill">{{ syncStatusText }}</span>
+        <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</span>
+        <button class="secondary" type="button" @click="setAppPin">{{ state.auth.hasPin ? 'Change PIN' : 'Set PIN' }}</button>
+        <button v-if="state.auth.hasPin" class="secondary" type="button" @click="clearAppPin">Remove PIN</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
         <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
         <button class="secondary" type="button" @click="resetToBlankTemplate">Reset blank</button>
@@ -1514,7 +1755,31 @@ onBeforeUnmount(() => {
     </nav>
 
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
+    <p v-if="state.duplicateWarning" class="status-message">{{ state.duplicateWarning }}</p>
     <p v-if="state.loading" class="loading">Loading...</p>
+
+    <section v-else-if="state.tab === 'dashboard'" class="dashboard-view">
+      <div class="dashboard-grid">
+        <article><span>Active Projects</span><strong>{{ dashboardStats.active }}</strong></article>
+        <article><span>Archived</span><strong>{{ dashboardStats.archived }}</strong></article>
+        <article><span>Total Expenses</span><strong>{{ money.format(dashboardStats.expenses) }}</strong></article>
+        <article><span>Mileage</span><strong>{{ number.format(dashboardStats.miles) }} mi</strong></article>
+        <article><span>Mileage Value</span><strong>{{ money.format(dashboardStats.mileage) }}</strong></article>
+        <article><span>Work Logged</span><strong>{{ number.format(dashboardStats.hours) }} hrs</strong></article>
+      </div>
+
+      <div class="dashboard-panel">
+        <div class="sheet-title-row"><span>Current project</span><strong>{{ projectTitle() }}</strong></div>
+        <div class="mini-summary">
+          <p><span>Client</span><strong>{{ meta.clientName || 'Not set' }}</strong></p>
+          <p><span>Job</span><strong>{{ meta.jobNumber || 'Not set' }}</strong></p>
+          <p><span>Invoice</span><strong>{{ meta.invoiceNumber || report.reportNo || 'Not set' }}</strong></p>
+          <p><span>Total Due</span><strong>{{ money.format(totalDue) }}</strong></p>
+          <p><span>Last Saved</span><strong>{{ state.lastSavedAt ? formatDateTime(state.lastSavedAt) : 'Not saved' }}</strong></p>
+          <p><span>Receipts Queued</span><strong>{{ state.receiptQueue.length }}</strong></p>
+        </div>
+      </div>
+    </section>
 
     <section v-else-if="state.tab === 'archive'" class="archive-view">
       <div class="archive-toolbar">
@@ -1523,6 +1788,9 @@ onBeforeUnmount(() => {
           {{ state.syncingLocal ? 'Syncing device drafts...' : `Sync ${localProjectCount} device draft${localProjectCount === 1 ? '' : 's'} to cloud` }}
         </button>
         <button v-if="state.storage === 'mongodb'" class="secondary" type="button" @click="recheckDeviceDrafts">Recheck device storage</button>
+        <button class="secondary" type="button" @click="exportJsonBackup">Export JSON Backup</button>
+        <button class="secondary" type="button" @click="openBackupImport">Import Backup</button>
+        <input ref="backupFileInput" class="hidden-file" type="file" accept="application/json" @change="importJsonBackup" />
         <button type="button" @click="createProject()">New project</button>
       </div>
       <p v-if="state.recoveryStatus" class="sync-status">{{ state.recoveryStatus }}</p>
@@ -1544,6 +1812,17 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
       <form class="report-form" @change="saveCurrentProject" @submit.prevent="saveCurrentProject">
         <h2>Report details</h2>
+        <input v-model="meta.clientName" placeholder="Client name" />
+        <div class="inline-fields">
+          <input v-model="meta.jobNumber" placeholder="Job number" />
+          <input v-model="meta.poNumber" placeholder="PO number" />
+        </div>
+        <input v-model="meta.siteName" placeholder="Site / location name" />
+        <div class="inline-fields">
+          <input v-model="meta.invoiceNumber" placeholder="Invoice number" />
+          <input v-model="meta.billingContact" placeholder="Billing contact" />
+        </div>
+        <input v-model="meta.billingEmail" type="email" placeholder="Billing email" />
         <input v-model="report.employeeName" placeholder="Employee name" />
         <input v-model="report.address" placeholder="Address" />
         <div class="inline-fields">
@@ -1560,6 +1839,7 @@ onBeforeUnmount(() => {
           <input v-model="report.reportDate" type="date" />
         </div>
         <input v-model="report.engagement" placeholder="Engagement" />
+        <textarea v-model="meta.notes" placeholder="Project notes"></textarea>
         <input v-model="report.laborTitle" placeholder="Labor title" />
         <input v-model="report.laborDescription" placeholder="Labor description" />
         <div class="inline-fields compact">
@@ -1584,6 +1864,9 @@ onBeforeUnmount(() => {
           </div>
           <dl>
             <dt>EXP. REPORT NO.</dt><dd>{{ report.reportNo }}</dd>
+            <dt>INVOICE NO.</dt><dd>{{ meta.invoiceNumber }}</dd>
+            <dt>CLIENT</dt><dd>{{ meta.clientName }}</dd>
+            <dt>JOB / PO</dt><dd>{{ [meta.jobNumber, meta.poNumber].filter(Boolean).join(' / ') }}</dd>
             <dt>DATE</dt><dd>{{ report.reportDate }}</dd>
             <dt>EMPLOYEE ID</dt><dd>{{ report.employeeId }}</dd>
             <dt>PERIOD</dt><dd>{{ formatPeriod() }}</dd>
@@ -1626,6 +1909,10 @@ onBeforeUnmount(() => {
 
         <form class="receipt-capture" @submit.prevent="saveReceiptDraft">
           <h2>Receipt OCR</h2>
+          <div v-if="state.receiptQueue.length" class="receipt-queue">
+            <strong>{{ state.receiptQueue.length }} receipt{{ state.receiptQueue.length === 1 ? '' : 's' }} saved locally</strong>
+            <span>They will be included in the device draft backup until synced.</span>
+          </div>
           <input type="file" accept="image/*" capture="environment" @change="handleReceiptFile" />
           <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
           <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
@@ -1856,5 +2143,6 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </section>
+    </template>
   </main>
 </template>

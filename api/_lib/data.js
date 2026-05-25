@@ -1,5 +1,15 @@
 function blankProjectData() {
   return {
+    meta: {
+      clientName: '',
+      jobNumber: '',
+      siteName: '',
+      poNumber: '',
+      invoiceNumber: '',
+      billingContact: '',
+      billingEmail: '',
+      notes: '',
+    },
     report: {
       employeeName: '',
       address: '',
@@ -27,8 +37,10 @@ function normalizeProjectData(data) {
   const blank = blankProjectData();
   const source = data && typeof data === 'object' ? data : {};
   const report = source.report && typeof source.report === 'object' ? source.report : {};
+  const meta = source.meta && typeof source.meta === 'object' ? source.meta : {};
 
   return {
+    meta: { ...blank.meta, ...meta },
     report: { ...blank.report, ...report },
     expenseRows: Array.isArray(source.expenseRows) ? source.expenseRows : [],
     mileageRows: Array.isArray(source.mileageRows) ? source.mileageRows : [],
