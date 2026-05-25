@@ -2859,7 +2859,7 @@ async function exportPdf(includeReceipts = false) {
     margin: { bottom: 52 },
   });
 
-  addRouteMapAppendix(doc, logo);
+  await addRouteMapAppendix(doc, logo);
 
   if (includeReceipts) {
     await addReceiptAppendix(doc, logo);
@@ -2982,10 +2982,11 @@ function imageFormatForDataUrl(src) {
   return /^data:image\/png/i.test(src || '') ? 'PNG' : 'JPEG';
 }
 
-function addRouteMapAppendix(doc, logo) {
+async function addRouteMapAppendix(doc, logo) {
   const routeRows = data.value.mileageRows.filter((row) => rowRoutePoints(row).length > 1);
   for (const row of routeRows) {
     const points = rowRoutePoints(row);
+    const mapImage = await createRouteMapImage(points).catch(() => '');
     doc.addPage('letter', 'landscape');
     addPdfHeader(doc, logo, 'Route Map Appendix');
     doc.setFontSize(10);
@@ -2997,8 +2998,201 @@ function addRouteMapAppendix(doc, logo) {
     doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, pdfMargin, 184);
     doc.text(fitPdfText(doc, `Start: ${row.startLocation || row.from || ''}`, 250), pdfMargin, 200);
     doc.text(fitPdfText(doc, `End: ${row.endLocation || row.to || ''}`, 250), pdfMargin, 216);
-    drawRouteDiagram(doc, points, 292, 120, 456, 300);
+    if (mapImage) {
+      drawRouteMapImage(doc, mapImage, 292, 120, 456, 300);
+    } else {
+      drawRouteDiagram(doc, points, 292, 120, 456, 300);
+    }
   }
+}
+
+function drawRouteMapImage(doc, mapImage, x, y, width, height) {
+  doc.setDrawColor(200, 209, 214);
+  doc.setFillColor(248, 250, 251);
+  doc.roundedRect(x, y, width, height, 8, 8, 'FD');
+  doc.addImage(mapImage, 'JPEG', x + 3, y + 3, width - 6, height - 6, undefined, 'FAST');
+  doc.setDrawColor(200, 209, 214);
+  doc.setLineWidth(1);
+  doc.roundedRect(x, y, width, height, 8, 8, 'S');
+}
+
+async function createRouteMapImage(points) {
+  const canvasWidth = 912;
+  const canvasHeight = 600;
+  const padding = 90;
+  const zoom = chooseRouteMapZoom(points, canvasWidth, canvasHeight, padding);
+  const center = routeMercatorCenter(points, zoom);
+  const topLeft = {
+    x: center.x - canvasWidth / 2,
+    y: center.y - canvasHeight / 2,
+  };
+  const canvas = document.createElement('canvas');
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#eef2ed';
+  context.fillRect(0, 0, canvasWidth, canvasHeight);
+
+  const tileCount = await drawMapTiles(context, topLeft, zoom, canvasWidth, canvasHeight);
+  if (!tileCount) throw new Error('Map tiles unavailable');
+
+  const projected = points.map((point) => {
+    const world = lonLatToWorldPixel(point.lng, point.lat, zoom);
+    return {
+      x: world.x - topLeft.x,
+      y: world.y - topLeft.y,
+    };
+  });
+
+  drawCanvasRoute(context, projected);
+  drawCanvasEndpoint(context, projected[0], 'S', '#4b5a60');
+  drawCanvasEndpoint(context, projected[projected.length - 1], 'E', '#846268');
+  drawCanvasMapControls(context, canvasWidth, canvasHeight, zoom);
+
+  const blob = await canvasToJpegBlob(canvas, 0.88);
+  return blobToDataUrl(blob);
+}
+
+function chooseRouteMapZoom(points, width, height, padding) {
+  for (let zoom = 18; zoom >= 2; zoom -= 1) {
+    const bounds = routeWorldBounds(points, zoom);
+    if (bounds.width <= width - padding * 2 && bounds.height <= height - padding * 2) return zoom;
+  }
+  return 2;
+}
+
+function routeMercatorCenter(points, zoom) {
+  const bounds = routeWorldBounds(points, zoom);
+  return {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2,
+  };
+}
+
+function routeWorldBounds(points, zoom) {
+  return points.reduce(
+    (box, point) => {
+      const projected = lonLatToWorldPixel(point.lng, point.lat, zoom);
+      return {
+        minX: Math.min(box.minX, projected.x),
+        maxX: Math.max(box.maxX, projected.x),
+        minY: Math.min(box.minY, projected.y),
+        maxY: Math.max(box.maxY, projected.y),
+        width: Math.max(box.maxX, projected.x) - Math.min(box.minX, projected.x),
+        height: Math.max(box.maxY, projected.y) - Math.min(box.minY, projected.y),
+      };
+    },
+    { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, width: 0, height: 0 }
+  );
+}
+
+function lonLatToWorldPixel(lng, lat, zoom) {
+  const tileScale = 256 * 2 ** zoom;
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+  const latRad = (clampedLat * Math.PI) / 180;
+  return {
+    x: ((lng + 180) / 360) * tileScale,
+    y: ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * tileScale,
+  };
+}
+
+async function drawMapTiles(context, topLeft, zoom, width, height) {
+  const tileSize = 256;
+  const tileLimit = 2 ** zoom;
+  const minTileX = Math.floor(topLeft.x / tileSize);
+  const maxTileX = Math.floor((topLeft.x + width) / tileSize);
+  const minTileY = Math.max(0, Math.floor(topLeft.y / tileSize));
+  const maxTileY = Math.min(tileLimit - 1, Math.floor((topLeft.y + height) / tileSize));
+  let drawn = 0;
+
+  const tileJobs = [];
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const wrappedTileX = ((tileX % tileLimit) + tileLimit) % tileLimit;
+      tileJobs.push({ tileX, wrappedTileX, tileY });
+    }
+  }
+
+  const tiles = await Promise.all(
+    tileJobs.map(async (tile) => ({
+      ...tile,
+      image: await loadTileImage(`https://tile.openstreetmap.org/${zoom}/${tile.wrappedTileX}/${tile.tileY}.png`).catch(() => null),
+    }))
+  );
+
+  tiles.forEach((tile) => {
+    if (!tile.image) return;
+    const drawX = tile.tileX * tileSize - topLeft.x;
+    const drawY = tile.tileY * tileSize - topLeft.y;
+    context.drawImage(tile.image, drawX, drawY, tileSize, tileSize);
+    drawn += 1;
+  });
+  return drawn;
+}
+
+async function loadTileImage(url) {
+  const response = await fetch(url, { mode: 'cors' });
+  if (!response.ok) throw new Error('Map tile unavailable');
+  const blob = await response.blob();
+  return loadImage(await blobToDataUrl(blob));
+}
+
+function drawCanvasRoute(context, projected) {
+  context.save();
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+  context.lineWidth = 10;
+  drawCanvasPolyline(context, projected);
+  context.strokeStyle = '#846268';
+  context.lineWidth = 5;
+  drawCanvasPolyline(context, projected);
+  context.restore();
+}
+
+function drawCanvasPolyline(context, projected) {
+  context.beginPath();
+  projected.forEach((point, index) => {
+    if (index === 0) context.moveTo(point.x, point.y);
+    else context.lineTo(point.x, point.y);
+  });
+  context.stroke();
+}
+
+function drawCanvasEndpoint(context, point, label, color) {
+  context.save();
+  context.fillStyle = color;
+  context.beginPath();
+  context.arc(point.x, point.y, 18, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = '#ffffff';
+  context.font = '700 18px Arial, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(label, point.x, point.y + 1);
+  context.restore();
+}
+
+function drawCanvasMapControls(context, width, height, zoom) {
+  context.save();
+  context.fillStyle = 'rgba(255, 255, 255, 0.86)';
+  context.fillRect(12, height - 34, 254, 22);
+  context.fillStyle = '#4b5a60';
+  context.font = '12px Arial, sans-serif';
+  context.fillText(`OpenStreetMap road map | zoom ${zoom}`, 20, height - 18);
+  context.fillStyle = 'rgba(255, 255, 255, 0.86)';
+  context.fillRect(width - 54, 14, 34, 46);
+  context.fillStyle = '#4b5a60';
+  context.beginPath();
+  context.moveTo(width - 37, 22);
+  context.lineTo(width - 46, 48);
+  context.lineTo(width - 28, 48);
+  context.closePath();
+  context.fill();
+  context.font = '700 11px Arial, sans-serif';
+  context.textAlign = 'center';
+  context.fillText('N', width - 37, 58);
+  context.restore();
 }
 
 function drawRouteDiagram(doc, points, x, y, width, height) {
@@ -3093,7 +3287,7 @@ function drawTopographicBackground(doc, x, y, width, height) {
 
   doc.setFontSize(7);
   doc.setTextColor(105, 118, 105);
-  doc.text('Topographic route diagram', x + 14, y + height - 14);
+  doc.text('Route diagram fallback', x + 14, y + height - 14);
   drawNorthArrow(doc, x + width - 34, y + 26);
 }
 
