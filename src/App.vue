@@ -2381,13 +2381,14 @@ async function loadHeaderWeather() {
     if (!response.ok) throw new Error('Weather unavailable');
     const result = await response.json();
     const current = result.current || {};
+    const locationLabel = await reverseGeocodeHeaderLocation(latitude, longitude).catch(() => 'Current location');
     state.header.weather = {
       temperature: Number.isFinite(current.temperature_2m) ? current.temperature_2m : null,
       condition: weatherCodeText(current.weather_code),
       code: current.weather_code,
       isDay: current.is_day !== 0,
       windMph: Number.isFinite(current.wind_speed_10m) ? current.wind_speed_10m : null,
-      locationLabel: 'Current location',
+      locationLabel,
       updatedAt: current.time || new Date().toISOString(),
     };
   } catch (error) {
@@ -2395,6 +2396,21 @@ async function loadHeaderWeather() {
   } finally {
     state.header.weatherLoading = false;
   }
+}
+
+async function reverseGeocodeHeaderLocation(latitude, longitude) {
+  const params = new URLSearchParams({
+    latitude: latitude.toFixed(4),
+    longitude: longitude.toFixed(4),
+    localityLanguage: 'en',
+  });
+  const response = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?${params.toString()}`);
+  if (!response.ok) throw new Error('Location unavailable');
+  const result = await response.json();
+  const city = result.city || result.locality || result.localityInfo?.administrative?.[0]?.name || '';
+  const region = result.principalSubdivisionCode || result.principalSubdivision || '';
+  if (city && region && city !== region) return `${city}, ${region}`;
+  return city || region || result.countryName || 'Current location';
 }
 
 async function hashPin(pin) {

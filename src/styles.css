@@ -164,16 +164,21 @@ h3 {
 }
 
 .app-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) minmax(340px, max-content) minmax(430px, max-content);
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  gap: 18px;
   max-width: 100vw;
   padding:
     calc(24px + env(safe-area-inset-top))
     max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
     18px
     max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
+}
+
+.app-header h1 {
+  font-size: clamp(30px, 3.2vw, 56px);
+  line-height: 1.08;
 }
 
 .brand-lockup {
@@ -200,8 +205,8 @@ h3 {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  min-width: 260px;
-  flex: 1 1 320px;
+  justify-self: center;
+  min-width: 0;
 }
 
 .clock-card,
@@ -216,7 +221,7 @@ h3 {
 .clock-card {
   display: grid;
   gap: 2px;
-  min-width: 148px;
+  min-width: 152px;
   padding: 9px 12px;
 }
 
@@ -236,7 +241,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 186px;
+  min-width: 226px;
   padding: 8px 12px 8px 9px;
 }
 
@@ -250,6 +255,13 @@ h3 {
   color: #17202a;
   font-size: 15px;
   line-height: 1.15;
+}
+
+.weather-card span:last-child {
+  overflow: hidden;
+  max-width: 170px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .weather-graphic {
@@ -440,7 +452,9 @@ h3 {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
+  justify-self: end;
   min-width: 0;
   max-width: 100%;
 }
@@ -1501,10 +1515,30 @@ h3 {
   background: white;
 }
 
+@media (max-width: 1420px) {
+  .app-header {
+    grid-template-columns: minmax(0, 1fr) minmax(380px, max-content);
+    align-items: start;
+  }
+
+  .header-live {
+    grid-column: 1;
+    justify-content: flex-start;
+    justify-self: start;
+  }
+
+  .header-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: start;
+    max-width: 520px;
+  }
+}
+
 @media (max-width: 980px) {
   .app-header {
     align-items: flex-start;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .brand-lockup {
@@ -1512,10 +1546,20 @@ h3 {
   }
 
   .header-live {
+    grid-column: auto;
     justify-content: flex-start;
+    justify-self: stretch;
     width: 100%;
     min-width: 0;
     flex: 0 1 auto;
+  }
+
+  .header-actions {
+    grid-column: auto;
+    grid-row: auto;
+    justify-content: flex-start;
+    justify-self: stretch;
+    max-width: 100%;
   }
 
   .statement-grid,
