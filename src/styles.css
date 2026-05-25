@@ -190,6 +190,124 @@ h3 {
   max-width: 100%;
 }
 
+.icon-button {
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  place-items: center;
+  border: 1px solid #c8d1d6;
+  background: white;
+  color: #263238;
+}
+
+.calculator-icon {
+  display: grid;
+  grid-template-columns: repeat(2, 6px);
+  grid-template-rows: 8px repeat(2, 6px);
+  gap: 3px;
+  width: 21px;
+  border: 2px solid currentColor;
+  border-radius: 4px;
+  padding: 3px;
+}
+
+.calculator-icon::before {
+  grid-column: 1 / -1;
+  border-radius: 2px;
+  background: currentColor;
+  content: "";
+}
+
+.calculator-icon i {
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.calculator-overlay {
+  position: fixed;
+  z-index: 1200;
+  top: calc(92px + env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  width: min(320px, calc(100vw - 32px));
+}
+
+.calculator-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #c8d1d6;
+  border-radius: 8px;
+  padding: 14px;
+  background: white;
+  box-shadow: 0 18px 40px rgb(23 32 42 / 24%);
+}
+
+.calculator-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.calculator-panel header strong {
+  color: #4b5a60;
+  font-size: 15px;
+}
+
+.calculator-display {
+  display: grid;
+  gap: 4px;
+  min-height: 74px;
+  border: 1px solid #d8e0e4;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #f8fafb;
+  text-align: right;
+}
+
+.calculator-display span {
+  min-height: 17px;
+  color: #627078;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.calculator-display strong {
+  overflow: hidden;
+  color: #17202a;
+  font-size: 28px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calculator-keys {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calculator-keys button {
+  min-height: 44px;
+  border: 1px solid #d8e0e4;
+  background: #f8fafb;
+  color: #17202a;
+}
+
+.calculator-keys .utility {
+  background: #eef2f4;
+  color: #4b5a60;
+}
+
+.calculator-keys .operator {
+  background: #846268;
+  color: white;
+}
+
+.calculator-keys .equals {
+  background: #4b5a60;
+  color: white;
+}
+
 .mode-pill {
   display: inline-flex;
   align-items: center;
@@ -1116,6 +1234,14 @@ h3 {
     flex: 1 1 140px;
   }
 
+  .header-actions .icon-button {
+    flex: 0 0 42px;
+  }
+
+  .calculator-overlay {
+    top: calc(76px + env(safe-area-inset-top));
+  }
+
   .tabs button {
     min-height: 40px;
     padding: 0 14px;
@@ -1201,6 +1327,7 @@ h3 {
   .tabs,
   .status-message,
   .loading,
+  .calculator-overlay,
   .print-toolbar {
     display: none !important;
   }

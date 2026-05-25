@@ -79,6 +79,14 @@ const state = reactive({
     routeLoading: false,
     error: '',
   },
+  calculator: {
+    open: false,
+    display: '0',
+    storedValue: null,
+    operator: '',
+    waitingForOperand: false,
+    history: '',
+  },
 });
 
 const routeMapEl = ref(null);
@@ -933,6 +941,107 @@ async function printPackage() {
   state.tab = 'print';
   await nextTick();
   window.print();
+}
+
+function toggleCalculator() {
+  state.calculator.open = !state.calculator.open;
+}
+
+function closeCalculator() {
+  state.calculator.open = false;
+}
+
+function formatCalculatorNumber(value) {
+  if (!Number.isFinite(value)) return 'Error';
+  const rounded = Math.round((value + Number.EPSILON) * 100000000) / 100000000;
+  return String(rounded).length > 12 ? rounded.toExponential(6) : String(rounded);
+}
+
+function calculatorInputDigit(digit) {
+  const calculator = state.calculator;
+  if (calculator.display === 'Error' || calculator.waitingForOperand) {
+    calculator.display = String(digit);
+    calculator.waitingForOperand = false;
+    return;
+  }
+  calculator.display = calculator.display === '0' ? String(digit) : `${calculator.display}${digit}`;
+}
+
+function calculatorInputDecimal() {
+  const calculator = state.calculator;
+  if (calculator.display === 'Error' || calculator.waitingForOperand) {
+    calculator.display = '0.';
+    calculator.waitingForOperand = false;
+    return;
+  }
+  if (!calculator.display.includes('.')) calculator.display = `${calculator.display}.`;
+}
+
+function calculatorClear() {
+  Object.assign(state.calculator, {
+    display: '0',
+    storedValue: null,
+    operator: '',
+    waitingForOperand: false,
+    history: '',
+  });
+}
+
+function calculatorBackspace() {
+  const calculator = state.calculator;
+  if (calculator.display === 'Error' || calculator.waitingForOperand) {
+    calculator.display = '0';
+    calculator.waitingForOperand = false;
+    return;
+  }
+  calculator.display = calculator.display.length > 1 ? calculator.display.slice(0, -1) : '0';
+}
+
+function calculatorToggleSign() {
+  const calculator = state.calculator;
+  if (calculator.display === '0' || calculator.display === 'Error') return;
+  calculator.display = calculator.display.startsWith('-') ? calculator.display.slice(1) : `-${calculator.display}`;
+}
+
+function calculatorPercent() {
+  const value = Number(state.calculator.display);
+  state.calculator.display = formatCalculatorNumber(value / 100);
+}
+
+function runCalculatorOperation(left, right, operator) {
+  if (operator === '+') return left + right;
+  if (operator === '-') return left - right;
+  if (operator === '*') return left * right;
+  if (operator === '/') return right === 0 ? NaN : left / right;
+  return right;
+}
+
+function calculatorChooseOperator(operator) {
+  const calculator = state.calculator;
+  const inputValue = Number(calculator.display);
+  if (calculator.storedValue == null || calculator.operator === '') {
+    calculator.storedValue = inputValue;
+  } else if (!calculator.waitingForOperand) {
+    const result = runCalculatorOperation(calculator.storedValue, inputValue, calculator.operator);
+    calculator.display = formatCalculatorNumber(result);
+    calculator.storedValue = result;
+  }
+
+  calculator.operator = operator;
+  calculator.waitingForOperand = true;
+  calculator.history = `${formatCalculatorNumber(calculator.storedValue)} ${operator}`;
+}
+
+function calculatorEquals() {
+  const calculator = state.calculator;
+  if (!calculator.operator || calculator.storedValue == null) return;
+  const inputValue = Number(calculator.display);
+  const result = runCalculatorOperation(calculator.storedValue, inputValue, calculator.operator);
+  calculator.history = `${formatCalculatorNumber(calculator.storedValue)} ${calculator.operator} ${formatCalculatorNumber(inputValue)} =`;
+  calculator.display = formatCalculatorNumber(result);
+  calculator.storedValue = null;
+  calculator.operator = '';
+  calculator.waitingForOperand = true;
 }
 
 async function patchProject(project, patch) {
@@ -2194,6 +2303,11 @@ onBeforeUnmount(() => {
       <div class="header-actions">
         <span class="mode-pill">{{ syncStatusText }}</span>
         <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</span>
+        <button class="icon-button" type="button" title="Calculator" aria-label="Open calculator" @click="toggleCalculator">
+          <span class="calculator-icon" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+        </button>
         <button class="secondary" type="button" @click="setAppPin">{{ state.auth.hasPin ? 'Change PIN' : 'Set PIN' }}</button>
         <button v-if="state.auth.hasPin" class="secondary" type="button" @click="clearAppPin">Remove PIN</button>
         <button class="secondary" type="button" @click="openPrintView">Print View</button>
@@ -2202,6 +2316,41 @@ onBeforeUnmount(() => {
         <button class="secondary" type="button" @click="resetToBlankTemplate">Reset blank</button>
       </div>
     </header>
+
+    <div v-if="state.calculator.open" class="calculator-overlay" role="dialog" aria-label="Calculator">
+      <section class="calculator-panel">
+        <header>
+          <strong>Calculator</strong>
+          <button class="icon" type="button" @click="closeCalculator">Close</button>
+        </header>
+        <div class="calculator-display">
+          <span>{{ state.calculator.history }}</span>
+          <strong>{{ state.calculator.display }}</strong>
+        </div>
+        <div class="calculator-keys">
+          <button type="button" class="utility" @click="calculatorClear">C</button>
+          <button type="button" class="utility" @click="calculatorToggleSign">+/-</button>
+          <button type="button" class="utility" @click="calculatorPercent">%</button>
+          <button type="button" class="operator" @click="calculatorChooseOperator('/')">/</button>
+          <button type="button" @click="calculatorInputDigit(7)">7</button>
+          <button type="button" @click="calculatorInputDigit(8)">8</button>
+          <button type="button" @click="calculatorInputDigit(9)">9</button>
+          <button type="button" class="operator" @click="calculatorChooseOperator('*')">x</button>
+          <button type="button" @click="calculatorInputDigit(4)">4</button>
+          <button type="button" @click="calculatorInputDigit(5)">5</button>
+          <button type="button" @click="calculatorInputDigit(6)">6</button>
+          <button type="button" class="operator" @click="calculatorChooseOperator('-')">-</button>
+          <button type="button" @click="calculatorInputDigit(1)">1</button>
+          <button type="button" @click="calculatorInputDigit(2)">2</button>
+          <button type="button" @click="calculatorInputDigit(3)">3</button>
+          <button type="button" class="operator" @click="calculatorChooseOperator('+')">+</button>
+          <button type="button" @click="calculatorBackspace">Del</button>
+          <button type="button" @click="calculatorInputDigit(0)">0</button>
+          <button type="button" @click="calculatorInputDecimal">.</button>
+          <button type="button" class="equals" @click="calculatorEquals">=</button>
+        </div>
+      </section>
+    </div>
 
     <nav class="tabs" aria-label="Main views">
       <button
