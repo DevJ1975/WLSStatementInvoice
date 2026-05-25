@@ -435,6 +435,40 @@ h3 {
   align-content: start;
 }
 
+.address-field {
+  position: relative;
+}
+
+.address-suggestions {
+  position: absolute;
+  z-index: 500;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  border: 1px solid #c8d1d6;
+  border-radius: 6px;
+  background: white;
+  box-shadow: 0 12px 24px rgb(23 32 42 / 14%);
+}
+
+.address-suggestions button {
+  display: block;
+  width: 100%;
+  min-height: 38px;
+  border-bottom: 1px solid #edf1f3;
+  border-radius: 0;
+  padding: 9px 12px;
+  background: white;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.address-suggestions button:hover {
+  background: #f8fafb;
+}
+
 .receipt-capture {
   position: static;
 }

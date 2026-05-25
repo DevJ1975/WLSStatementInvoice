@@ -41,13 +41,34 @@ const state = reactive({
     error: '',
     selectedMileageId: '',
   },
+  places: {
+    fromSuggestions: [],
+    toSuggestions: [],
+    loadingField: '',
+    routeLoading: false,
+    error: '',
+  },
 });
 
 const routeMapEl = ref(null);
 const expenseForm = reactive({ date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
-const mileageForm = reactive({ date: '', from: '', to: '', purpose: '', miles: '', rate: '0.725' });
+const mileageForm = reactive({
+  date: '',
+  from: '',
+  to: '',
+  purpose: '',
+  miles: '',
+  rate: '0.725',
+  fromPlace: null,
+  toPlace: null,
+  routeGeometry: [],
+  routeDistanceMiles: 0,
+  routeDurationSeconds: 0,
+  calculationMode: 'manual',
+});
 const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
 let gpsTimer = null;
+const addressTimers = {};
 let routeMap = null;
 let routeLayer = null;
 
@@ -61,11 +82,16 @@ const totalDue = computed(() => laborTotal.value + expenseTotal.value + mileageT
 const totalHours = computed(() => data.value.workLogs.reduce((sum, row) => sum + Number(row.hours || 0), 0));
 const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value / data.value.workLogs.length : 0));
 const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
-const gpsMileageRows = computed(() => data.value.mileageRows.filter((row) => row.trackingMode === 'gps' && row.routePoints?.length));
+const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => rowRoutePoints(row).length));
 const selectedMileageRoute = computed(() => {
-  return gpsMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || gpsMileageRows.value[0] || null;
+  if (state.gps.selectedMileageId === 'draft-route') return null;
+  return routeMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || routeMileageRows.value[0] || null;
 });
-const displayedRoutePoints = computed(() => (state.gps.active ? state.gps.routePoints : selectedMileageRoute.value?.routePoints || []));
+const displayedRoutePoints = computed(() => {
+  if (state.gps.active) return state.gps.routePoints;
+  if (state.gps.selectedMileageId === 'draft-route') return mileageForm.routeGeometry;
+  return rowRoutePoints(selectedMileageRoute.value);
+});
 const liveGpsMiles = computed(() => metersToMiles(totalRouteMeters(state.gps.routePoints)));
 const liveGpsDuration = computed(() => state.gps.elapsedSeconds);
 const workLogCategoryTotals = computed(() =>
@@ -141,15 +167,36 @@ function normalizeRoutePoint(point) {
   };
 }
 
+function normalizePlace(place) {
+  if (!place || !Number.isFinite(Number(place.lat)) || !Number.isFinite(Number(place.lng))) return null;
+  return {
+    id: place.id || `${place.lat},${place.lng}`,
+    label: place.label || '',
+    lat: Number(place.lat),
+    lng: Number(place.lng),
+    city: place.city || '',
+    state: place.state || '',
+    postcode: place.postcode || '',
+  };
+}
+
 function normalizeMileageRow(row) {
   const routePoints = Array.isArray(row?.routePoints)
     ? row.routePoints.map(normalizeRoutePoint).filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+    : [];
+  const routeGeometry = Array.isArray(row?.routeGeometry)
+    ? row.routeGeometry.map(normalizeRoutePoint).filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
     : [];
 
   return {
     ...row,
     trackingMode: row?.trackingMode || (routePoints.length ? 'gps' : 'manual'),
+    calculationMode: row?.calculationMode || (routeGeometry.length ? 'address-route' : routePoints.length ? 'gps' : 'manual'),
     routePoints,
+    routeGeometry,
+    fromPlace: normalizePlace(row?.fromPlace),
+    toPlace: normalizePlace(row?.toPlace),
+    routeDistanceMiles: Number(row?.routeDistanceMiles || 0),
     distanceMiles: Number(row?.distanceMiles || row?.miles || 0),
     durationSeconds: Number(row?.durationSeconds || 0),
     startLocation: row?.startLocation || '',
@@ -380,9 +427,11 @@ async function addExpense() {
 }
 
 async function addMileage() {
+  const isAddressRoute = mileageForm.calculationMode === 'address-route' && mileageForm.routeGeometry.length;
   data.value.mileageRows.push({
     id: newId(),
     trackingMode: 'manual',
+    calculationMode: isAddressRoute ? 'address-route' : 'manual',
     date: mileageForm.date,
     from: mileageForm.from.trim(),
     to: mileageForm.to.trim(),
@@ -390,13 +439,122 @@ async function addMileage() {
     miles: Number(mileageForm.miles || 0),
     rate: Number(mileageForm.rate || 0),
     routePoints: [],
+    routeGeometry: isAddressRoute ? [...mileageForm.routeGeometry] : [],
+    routeDistanceMiles: isAddressRoute ? Number(mileageForm.routeDistanceMiles || mileageForm.miles || 0) : 0,
+    fromPlace: isAddressRoute ? mileageForm.fromPlace : null,
+    toPlace: isAddressRoute ? mileageForm.toPlace : null,
     distanceMiles: Number(mileageForm.miles || 0),
-    durationSeconds: 0,
+    durationSeconds: isAddressRoute ? Number(mileageForm.routeDurationSeconds || 0) : 0,
     startLocation: '',
     endLocation: '',
   });
-  Object.assign(mileageForm, { date: '', from: '', to: '', purpose: '', miles: '', rate: '0.725' });
+  resetMileageForm();
   await saveCurrentProject();
+}
+
+function resetMileageForm() {
+  Object.assign(mileageForm, {
+    date: '',
+    from: '',
+    to: '',
+    purpose: '',
+    miles: '',
+    rate: '0.725',
+    fromPlace: null,
+    toPlace: null,
+    routeGeometry: [],
+    routeDistanceMiles: 0,
+    routeDurationSeconds: 0,
+    calculationMode: 'manual',
+  });
+  state.places.fromSuggestions = [];
+  state.places.toSuggestions = [];
+}
+
+function clearAddressRoute() {
+  mileageForm.routeGeometry = [];
+  mileageForm.routeDistanceMiles = 0;
+  mileageForm.routeDurationSeconds = 0;
+  mileageForm.calculationMode = 'manual';
+  if (state.gps.selectedMileageId === 'draft-route') {
+    state.gps.selectedMileageId = '';
+  }
+}
+
+function handleAddressInput(field) {
+  const placeKey = `${field}Place`;
+  const suggestionsKey = `${field}Suggestions`;
+  mileageForm[placeKey] = null;
+  clearAddressRoute();
+  state.places.error = '';
+
+  const text = mileageForm[field].trim();
+  clearTimeout(addressTimers[field]);
+  if (text.length < 3) {
+    state.places[suggestionsKey] = [];
+    return;
+  }
+
+  addressTimers[field] = setTimeout(() => fetchAddressSuggestions(field, text), 350);
+}
+
+async function fetchAddressSuggestions(field, text) {
+  const suggestionsKey = `${field}Suggestions`;
+  try {
+    state.places.loadingField = field;
+    const payload = await apiJson(`/api/places/autocomplete?text=${encodeURIComponent(text)}`);
+    if (mileageForm[field].trim() !== text) return;
+    state.places[suggestionsKey] = payload.suggestions || [];
+  } catch (error) {
+    state.places[suggestionsKey] = [];
+    state.places.error = error.message || 'Address suggestions are unavailable.';
+  } finally {
+    if (state.places.loadingField === field) {
+      state.places.loadingField = '';
+    }
+  }
+}
+
+async function selectAddressSuggestion(field, suggestion) {
+  const place = normalizePlace(suggestion);
+  if (!place) return;
+  const placeKey = `${field}Place`;
+  const suggestionsKey = `${field}Suggestions`;
+  mileageForm[field] = place.label;
+  mileageForm[placeKey] = place;
+  state.places[suggestionsKey] = [];
+  state.places.error = '';
+
+  if (mileageForm.fromPlace && mileageForm.toPlace) {
+    await calculateAddressMileage();
+  }
+}
+
+async function calculateAddressMileage() {
+  if (!mileageForm.fromPlace || !mileageForm.toPlace) return;
+  try {
+    state.places.routeLoading = true;
+    const params = new URLSearchParams({
+      fromLat: mileageForm.fromPlace.lat,
+      fromLng: mileageForm.fromPlace.lng,
+      toLat: mileageForm.toPlace.lat,
+      toLng: mileageForm.toPlace.lng,
+    });
+    const payload = await apiJson(`/api/places/route?${params.toString()}`);
+    const route = payload.route || {};
+    mileageForm.miles = route.distanceMiles || '';
+    mileageForm.routeDistanceMiles = route.distanceMiles || 0;
+    mileageForm.routeDurationSeconds = route.durationSeconds || 0;
+    mileageForm.routeGeometry = Array.isArray(route.routeGeometry) ? route.routeGeometry.map(normalizeRoutePoint) : [];
+    mileageForm.calculationMode = mileageForm.routeGeometry.length ? 'address-route' : 'manual';
+    state.gps.selectedMileageId = mileageForm.routeGeometry.length ? 'draft-route' : '';
+    state.places.error = '';
+  } catch (error) {
+    clearAddressRoute();
+    state.places.error = error.message || 'Mileage calculation is unavailable.';
+  } finally {
+    state.places.routeLoading = false;
+  }
 }
 
 function currentDateInputValue(date = new Date()) {
@@ -570,7 +728,7 @@ function discardGpsTrip() {
 }
 
 function selectMileageRoute(row) {
-  if (row.trackingMode === 'gps' && row.routePoints?.length) {
+  if (rowRoutePoints(row).length) {
     state.gps.selectedMileageId = row.id;
   }
 }
@@ -797,6 +955,13 @@ function receiptImageUrl(receipt) {
   return `/api/projects/${state.currentProject.id}/receipts/${receipt.id}/image`;
 }
 
+function rowRoutePoints(row) {
+  if (!row) return [];
+  if (row.calculationMode === 'address-route' && row.routeGeometry?.length) return row.routeGeometry;
+  if (row.routeGeometry?.length) return row.routeGeometry;
+  return row.routePoints || [];
+}
+
 function routePinIcon(label, color) {
   return L.divIcon({
     className: 'route-pin-icon',
@@ -849,7 +1014,7 @@ async function renderRouteMap() {
 }
 
 function routeMetrics(row) {
-  const points = row?.routePoints || [];
+  const points = rowRoutePoints(row);
   const miles = points.length ? metersToMiles(totalRouteMeters(points)) : Number(row?.miles || 0);
   return {
     miles,
@@ -913,7 +1078,11 @@ async function exportPdf(includeReceipts = false) {
       row.date,
       row.from,
       row.to,
-      row.trackingMode === 'gps' ? `${row.purpose || ''} (GPS)` : row.purpose,
+      row.trackingMode === 'gps'
+        ? `${row.purpose || ''} (GPS)`
+        : row.calculationMode === 'address-route'
+          ? `${row.purpose || ''} (Auto route)`
+          : row.purpose,
       number.format(row.miles),
       `$${mileageRate.format(row.rate)}`,
       money.format(row.miles * row.rate),
@@ -942,8 +1111,9 @@ async function exportPdf(includeReceipts = false) {
 }
 
 function addRouteMapAppendix(doc, logo) {
-  const routeRows = data.value.mileageRows.filter((row) => row.trackingMode === 'gps' && row.routePoints?.length > 1);
+  const routeRows = data.value.mileageRows.filter((row) => rowRoutePoints(row).length > 1);
   for (const row of routeRows) {
+    const points = rowRoutePoints(row);
     doc.addPage('letter', 'landscape');
     addPdfHeader(doc, logo, 'Route Map Appendix');
     doc.setFontSize(10);
@@ -951,10 +1121,11 @@ function addRouteMapAppendix(doc, logo) {
     doc.text(`Date: ${row.date || ''}`, 42, 88);
     doc.text(`Purpose: ${row.purpose || 'GPS trip'}`, 42, 104);
     doc.text(`Miles: ${number.format(row.miles || row.distanceMiles || 0)}`, 42, 120);
-    doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, 42, 136);
-    doc.text(`Start: ${row.startLocation || row.from || ''}`, 42, 152);
-    doc.text(`End: ${row.endLocation || row.to || ''}`, 42, 168);
-    drawRouteDiagram(doc, row.routePoints, 292, 88, 456, 300);
+    doc.text(`Source: ${row.trackingMode === 'gps' ? 'GPS trip' : 'Address route'}`, 42, 136);
+    doc.text(`Duration: ${formatDuration(row.durationSeconds || 0)}`, 42, 152);
+    doc.text(`Start: ${row.startLocation || row.from || ''}`, 42, 168);
+    doc.text(`End: ${row.endLocation || row.to || ''}`, 42, 184);
+    drawRouteDiagram(doc, points, 292, 88, 456, 300);
   }
 }
 
@@ -1018,7 +1189,14 @@ function addPdfHeader(doc, logo, title) {
 }
 
 watch(
-  () => [state.tab, state.currentProject?.id, state.gps.selectedMileageId, state.gps.routePoints.length, gpsMileageRows.value.length],
+  () => [
+    state.tab,
+    state.currentProject?.id,
+    state.gps.selectedMileageId,
+    state.gps.routePoints.length,
+    mileageForm.routeGeometry.length,
+    routeMileageRows.value.length,
+  ],
   () => {
     renderRouteMap();
   },
@@ -1244,13 +1422,55 @@ onBeforeUnmount(() => {
         <form @submit.prevent="addMileage">
           <h2>Add mileage</h2>
           <input v-model="mileageForm.date" type="date" required />
-          <input v-model="mileageForm.from" placeholder="From" required />
-          <input v-model="mileageForm.to" placeholder="To" required />
+          <div class="address-field">
+            <input
+              v-model="mileageForm.from"
+              autocomplete="off"
+              placeholder="From"
+              required
+              @input="handleAddressInput('from')"
+            />
+            <div v-if="state.places.fromSuggestions.length" class="address-suggestions">
+              <button
+                v-for="suggestion in state.places.fromSuggestions"
+                :key="suggestion.id"
+                type="button"
+                @click="selectAddressSuggestion('from', suggestion)"
+              >
+                {{ suggestion.label }}
+              </button>
+            </div>
+          </div>
+          <div class="address-field">
+            <input
+              v-model="mileageForm.to"
+              autocomplete="off"
+              placeholder="To"
+              required
+              @input="handleAddressInput('to')"
+            />
+            <div v-if="state.places.toSuggestions.length" class="address-suggestions">
+              <button
+                v-for="suggestion in state.places.toSuggestions"
+                :key="suggestion.id"
+                type="button"
+                @click="selectAddressSuggestion('to', suggestion)"
+              >
+                {{ suggestion.label }}
+              </button>
+            </div>
+          </div>
           <input v-model="mileageForm.purpose" placeholder="Purpose" />
           <div class="inline-fields compact">
             <input v-model="mileageForm.miles" type="number" min="0" step="0.1" placeholder="Miles" required />
             <input v-model="mileageForm.rate" type="number" min="0" step="0.001" placeholder="Rate" required />
           </div>
+          <p v-if="state.places.loadingField" class="muted">Looking up {{ state.places.loadingField }} address...</p>
+          <p v-if="state.places.routeLoading" class="muted">Calculating driving mileage...</p>
+          <p v-if="state.places.error" class="status-message gps-message">{{ state.places.error }}</p>
+          <p v-if="mileageForm.calculationMode === 'address-route'" class="muted">
+            Driving mileage calculated from selected addresses. Miles remain editable.
+          </p>
           <button type="submit">Add mileage</button>
         </form>
 
@@ -1281,7 +1501,7 @@ onBeforeUnmount(() => {
               <thead><tr><th>Type</th><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="row in data.mileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
-                  <td>{{ row.trackingMode === 'gps' ? 'GPS' : 'Manual' }}</td>
+                  <td>{{ row.trackingMode === 'gps' ? 'GPS' : row.calculationMode === 'address-route' ? 'Auto' : 'Manual' }}</td>
                   <td><input class="table-input" v-model="row.date" type="date" @change="saveCurrentProject" /></td>
                   <td><input class="table-input" v-model="row.from" @change="saveCurrentProject" /></td>
                   <td><input class="table-input" v-model="row.to" @change="saveCurrentProject" /></td>
@@ -1290,7 +1510,7 @@ onBeforeUnmount(() => {
                   <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @change="saveCurrentProject" /></td>
                   <td>{{ money.format(row.miles * row.rate) }}</td>
                   <td>
-                    <button v-if="row.trackingMode === 'gps'" class="icon" type="button" @click="selectMileageRoute(row)">Map</button>
+                    <button v-if="rowRoutePoints(row).length" class="icon" type="button" @click="selectMileageRoute(row)">Map</button>
                     <button class="icon" type="button" @click="removeRow('mileageRows', row.id)">Delete</button>
                   </td>
                 </tr>
@@ -1303,19 +1523,19 @@ onBeforeUnmount(() => {
             <p><span>Total Miles</span><strong>{{ number.format(totalMiles) }}</strong></p>
             <p><span>IRS Rate</span><strong>${{ mileageRate.format(data.mileageRows[0]?.rate || 0) }}</strong></p>
             <p><span>Total Reimbursement</span><strong>{{ money.format(mileageTotal) }}</strong></p>
-            <p><span>GPS Trips</span><strong>{{ gpsMileageRows.length }}</strong></p>
+            <p><span>Mapped Trips</span><strong>{{ routeMileageRows.length }}</strong></p>
           </aside>
         </div>
 
         <div class="route-map-panel">
           <div class="sheet-title-row">
-            <span>{{ state.gps.active ? 'Live GPS route' : 'Saved GPS route' }}</span>
+            <span>{{ state.gps.active ? 'Live GPS route' : state.gps.selectedMileageId === 'draft-route' ? 'Calculated address route' : 'Saved route' }}</span>
             <strong v-if="selectedMileageRoute && !state.gps.active">
               {{ number.format(routeMetrics(selectedMileageRoute).miles) }} mi
             </strong>
           </div>
           <div ref="routeMapEl" class="route-map" aria-label="Mileage route map"></div>
-          <p v-if="!displayedRoutePoints.length" class="muted route-empty">Start a GPS trip or select a saved GPS mileage row to show a route map.</p>
+          <p v-if="!displayedRoutePoints.length" class="muted route-empty">Start a GPS trip or select addresses to calculate a route map.</p>
           <div v-else class="summary-strip route-strip">
             <span>Points <strong>{{ displayedRoutePoints.length }}</strong></span>
             <span v-if="state.gps.active">Live Miles <strong>{{ number.format(liveGpsMiles) }}</strong></span>
