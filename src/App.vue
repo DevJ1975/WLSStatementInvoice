@@ -19,6 +19,10 @@ const number = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const mileageRate = new Intl.NumberFormat('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 const gpsAccuracyLimit = 250;
 const metersPerMile = 1609.344;
+const receiptImageTargetBytes = 900 * 1024;
+const receiptImageMaxBytes = 3 * 1024 * 1024;
+const receiptImageMaxDimension = 1600;
+const receiptImageMinDimension = 900;
 
 const state = reactive({
   loading: true,
@@ -155,6 +159,8 @@ function emptyReceiptDraft() {
     fileName: '',
     imageBlob: null,
     previewUrl: '',
+    originalSize: 0,
+    compressedSize: 0,
   };
 }
 
@@ -792,14 +798,17 @@ async function handleReceiptFile(event) {
   const file = event.target.files?.[0];
   if (!file) return;
 
+  revokeReceiptPreview();
   state.receiptDraft = emptyReceiptDraft();
-  state.receiptDraft.fileName = file.name;
+  state.receiptDraft.fileName = compressedReceiptFileName(file.name);
+  state.receiptDraft.originalSize = file.size;
   state.receiptOcrRunning = true;
 
   try {
     const image = await compressImage(file);
     state.receiptDraft.imageBlob = image.blob;
     state.receiptDraft.previewUrl = image.previewUrl;
+    state.receiptDraft.compressedSize = image.blob.size;
 
     const { createWorker } = await import('tesseract.js');
     const worker = await createWorker('eng');
@@ -862,17 +871,73 @@ async function compressImage(file) {
   const dataUrl = await fileToDataUrl(file);
   const image = await loadImage(dataUrl);
   const canvas = document.createElement('canvas');
-  const maxWidth = 1400;
-  const scale = Math.min(1, maxWidth / image.width);
-  canvas.width = Math.round(image.width * scale);
-  canvas.height = Math.round(image.height * scale);
   const context = canvas.getContext('2d');
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+  if (!context) throw new Error('Unable to prepare receipt image compression.');
+  const longestSide = Math.max(image.width, image.height);
+  let maxDimension = Math.min(receiptImageMaxDimension, longestSide);
+  const minDimension = Math.min(receiptImageMinDimension, maxDimension);
+  let blob = null;
+
+  while (maxDimension >= minDimension) {
+    const scale = Math.min(1, maxDimension / longestSide);
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of [0.82, 0.74, 0.66, 0.58]) {
+      blob = await canvasToJpegBlob(canvas, quality);
+      if (blob.size <= receiptImageTargetBytes) break;
+    }
+
+    if (blob.size <= receiptImageTargetBytes || maxDimension === minDimension) break;
+    maxDimension = Math.max(minDimension, Math.floor(maxDimension * 0.82));
+  }
+
+  if (!blob) throw new Error('Unable to compress receipt image.');
+  if (blob.size > receiptImageMaxBytes) {
+    throw new Error(`Compressed receipt is still too large (${formatBytes(blob.size)}). Please retake the photo closer to the receipt or crop it first.`);
+  }
+
   return {
     blob,
     previewUrl: URL.createObjectURL(blob),
   };
+}
+
+function canvasToJpegBlob(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('Unable to create compressed receipt image.'));
+      },
+      'image/jpeg',
+      quality
+    );
+  });
+}
+
+function compressedReceiptFileName(name) {
+  const base = (name || 'receipt').replace(/\.[^.]+$/, '') || 'receipt';
+  return `${base}-compressed.jpg`;
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function receiptCompressionText() {
+  const original = state.receiptDraft.originalSize;
+  const compressed = state.receiptDraft.compressedSize;
+  if (!original || !compressed) return '';
+  return `Compressed from ${formatBytes(original)} to ${formatBytes(compressed)} before upload.`;
+}
+
+function revokeReceiptPreview() {
+  if (state.receiptDraft.previewUrl) URL.revokeObjectURL(state.receiptDraft.previewUrl);
 }
 
 function fileToDataUrl(file) {
@@ -911,6 +976,8 @@ async function saveReceiptDraft() {
           paymentMethod: state.receiptDraft.paymentMethod,
           notes: state.receiptDraft.notes,
           ocrText: state.receiptDraft.ocrText,
+          originalImageBytes: state.receiptDraft.originalSize,
+          storedImageBytes: state.receiptDraft.compressedSize,
         })
       );
       const response = await fetch(`/api/projects/${state.currentProject.id}/receipts`, {
@@ -934,6 +1001,8 @@ async function saveReceiptDraft() {
         paymentMethod: state.receiptDraft.paymentMethod,
         notes: state.receiptDraft.notes,
         ocrText: state.receiptDraft.ocrText,
+        originalImageBytes: state.receiptDraft.originalSize,
+        storedImageBytes: state.receiptDraft.compressedSize,
         imageDataUrl,
         createdAt: new Date().toISOString(),
       });
@@ -949,6 +1018,7 @@ async function saveReceiptDraft() {
       await saveCurrentProject();
     }
 
+    revokeReceiptPreview();
     state.receiptDraft = emptyReceiptDraft();
   } catch (error) {
     state.error = error.message;
@@ -1229,6 +1299,7 @@ watch(
 onMounted(loadProjects);
 onBeforeUnmount(() => {
   stopGpsTripWatcher();
+  revokeReceiptPreview();
   if (routeMap) {
     routeMap.remove();
     routeMap = null;
@@ -1378,6 +1449,7 @@ onBeforeUnmount(() => {
           <h2>Receipt OCR</h2>
           <input type="file" accept="image/*" capture="environment" @change="handleReceiptFile" />
           <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
+          <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
           <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
           <input v-model="state.receiptDraft.vendor" placeholder="Vendor" />
           <input v-model="state.receiptDraft.date" type="date" />

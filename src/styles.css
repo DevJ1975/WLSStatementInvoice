@@ -518,6 +518,17 @@ h3 {
   background: #f8fafb;
 }
 
+.compression-note {
+  margin: 0;
+  border: 1px solid #c8d1d6;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #f8fafb;
+  color: #4b5a60;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .receipt-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

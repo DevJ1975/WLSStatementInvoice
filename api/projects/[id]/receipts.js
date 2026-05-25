@@ -4,6 +4,8 @@ const { normalizeProjectData, projectPayload } = require('../../_lib/data');
 const { getProjectsCollection, getReceiptsBucket, resetMongoCacheIfClosed, toObjectId } = require('../../_lib/mongo');
 const { sendJson } = require('../../_lib/http');
 
+const receiptUploadLimitBytes = 3 * 1024 * 1024;
+
 function projectId(req) {
   const value = req.query?.id;
   return Array.isArray(value) ? value[0] : value;
@@ -19,7 +21,7 @@ function parseMultipart(req) {
       headers: req.headers,
       limits: {
         files: 1,
-        fileSize: 8 * 1024 * 1024,
+        fileSize: receiptUploadLimitBytes,
       },
     });
 
@@ -30,7 +32,7 @@ function parseMultipart(req) {
     busboy.on('file', (name, file, info) => {
       fileInfo = info;
       file.on('data', (chunk) => chunks.push(chunk));
-      file.on('limit', () => reject(new Error('Receipt image is larger than 8MB.')));
+      file.on('limit', () => reject(new Error('Receipt image is larger than 3MB after compression.')));
     });
 
     busboy.on('error', reject);
@@ -110,6 +112,8 @@ async function handler(req, res) {
       imageFileId: String(uploadStream.id),
       imageFileName: file.filename,
       imageContentType: file.mimeType,
+      originalImageBytes: Number(metadata.originalImageBytes || 0),
+      storedImageBytes: Number(metadata.storedImageBytes || file.buffer.length),
       createdAt: new Date().toISOString(),
     };
 
