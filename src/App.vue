@@ -404,6 +404,29 @@ async function restoreProject(project) {
   await patchProject(project, { status: 'active' });
 }
 
+async function deleteProject(project) {
+  const title = projectTitle(project);
+  if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return;
+
+  if (state.storage === 'mongodb' && !project.id.startsWith('local-')) {
+    await apiJson(`/api/projects/${project.id}`, { method: 'DELETE' });
+  }
+
+  state.projects = state.projects.filter((item) => item.id !== project.id);
+  if (state.currentProject?.id === project.id) {
+    state.currentProject = state.projects[0] || null;
+    if (state.currentProject && state.storage === 'mongodb') {
+      await openProject(state.currentProject.id);
+    }
+  }
+
+  if (!state.projects.length) {
+    await createProject('Untitled expense project');
+  } else {
+    saveLocalArchive();
+  }
+}
+
 async function resetToBlankTemplate() {
   if (!state.currentProject) return;
   stopGpsTripWatcher();
@@ -1263,6 +1286,7 @@ onBeforeUnmount(() => {
           <button class="secondary" type="button" @click="renameProject(project)">Rename</button>
           <button v-if="project.status !== 'archived'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
           <button v-else class="secondary" type="button" @click="restoreProject(project)">Restore</button>
+          <button class="danger" type="button" @click="deleteProject(project)">Delete</button>
         </article>
       </div>
     </section>

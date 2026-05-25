@@ -1,6 +1,7 @@
 :root {
   color: #17202a;
   background: #f3f6f8;
+  color-scheme: light;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -10,8 +11,14 @@
   box-sizing: border-box;
 }
 
+html {
+  min-width: 320px;
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
+  overflow-x: hidden;
 }
 
 button,
@@ -51,6 +58,12 @@ button.icon {
   font-size: 12px;
 }
 
+button.danger {
+  border: 1px solid #c37f88;
+  background: #fff5f5;
+  color: #7a2731;
+}
+
 input,
 select,
 textarea {
@@ -70,6 +83,7 @@ textarea {
 
 main {
   min-height: 100vh;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 form {
@@ -120,7 +134,11 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 32px clamp(18px, 4vw, 48px) 18px;
+  padding:
+    calc(24px + env(safe-area-inset-top))
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    18px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
 }
 
 .brand-lockup {
@@ -142,6 +160,7 @@ h3 {
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
+  max-width: 100%;
 }
 
 .mode-pill {
@@ -161,7 +180,12 @@ h3 {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding: 0 clamp(18px, 4vw, 48px) 24px;
+  padding:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    24px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
+  -webkit-overflow-scrolling: touch;
 }
 
 .tabs button {
@@ -179,11 +203,15 @@ h3 {
 }
 
 .loading {
-  padding: 0 clamp(18px, 4vw, 48px);
+  padding: 0 max(clamp(16px, 4vw, 48px), env(safe-area-inset-right)) 0 max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
 }
 
 .status-message {
-  margin: 0 clamp(18px, 4vw, 48px) 18px;
+  margin:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    18px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
   border: 1px solid #e2d4a7;
   border-radius: 6px;
   padding: 10px 12px;
@@ -195,7 +223,11 @@ h3 {
 .archive-view {
   display: grid;
   gap: 16px;
-  padding: 0 clamp(18px, 4vw, 48px) 48px;
+  padding:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    48px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
 }
 
 .archive-toolbar {
@@ -251,7 +283,11 @@ h3 {
   display: grid;
   grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
   gap: 18px;
-  padding: 0 clamp(18px, 4vw, 48px) 48px;
+  padding:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    48px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
 }
 
 .report-form {
@@ -699,6 +735,15 @@ h3 {
 }
 
 @media (max-width: 620px) {
+  h1 {
+    font-size: 30px;
+    line-height: 1.08;
+  }
+
+  h2 {
+    font-size: 19px;
+  }
+
   .brand-lockup {
     flex-direction: column;
     gap: 10px;
@@ -707,6 +752,42 @@ h3 {
   .brand-lockup img {
     width: 84px;
     height: 48px;
+  }
+
+  .header-actions,
+  .archive-toolbar {
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .header-actions button,
+  .archive-toolbar button {
+    flex: 1 1 140px;
+  }
+
+  .tabs button {
+    min-height: 40px;
+    padding: 0 14px;
+  }
+
+  form,
+  .archive-list article,
+  .statement-sheet,
+  .sheet-panel,
+  .gps-panel {
+    border-radius: 8px;
+    padding: 14px;
+  }
+
+  .archive-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sheet-title-row,
+  .sheet-topline {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .inline-fields,
@@ -726,5 +807,27 @@ h3 {
 
   .statement-table {
     min-width: 620px;
+  }
+}
+
+@media (max-width: 380px) {
+  .app-header,
+  .tabs,
+  .archive-view,
+  .statement-grid,
+  .workbook-view {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+
+  input,
+  select,
+  textarea {
+    min-height: 40px;
+    padding: 9px 10px;
+  }
+
+  button {
+    min-height: 40px;
   }
 }

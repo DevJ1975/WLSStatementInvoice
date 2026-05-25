@@ -1,5 +1,5 @@
 const { deriveProjectTitle, normalizeProjectData, projectPayload, projectSummary } = require('../_lib/data');
-const { getProjectsCollection, resetMongoCacheIfClosed, toObjectId } = require('../_lib/mongo');
+const { getProjectsCollection, getReceiptsBucket, resetMongoCacheIfClosed, toObjectId } = require('../_lib/mongo');
 const { readBody, sendJson } = require('../_lib/http');
 
 function projectId(req) {
@@ -69,7 +69,27 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    res.setHeader('Allow', 'GET, PUT, PATCH');
+    if (req.method === 'DELETE') {
+      const project = await collection.findOne({ _id });
+      if (!project) {
+        sendJson(res, 404, { error: 'Project not found.' });
+        return;
+      }
+
+      const receiptFileIds = (project.data?.receipts || [])
+        .map((receipt) => toObjectId(receipt.imageFileId))
+        .filter(Boolean);
+      if (receiptFileIds.length) {
+        const bucket = await getReceiptsBucket();
+        await Promise.allSettled(receiptFileIds.map((fileId) => bucket.delete(fileId)));
+      }
+
+      await collection.deleteOne({ _id });
+      sendJson(res, 200, { deleted: true, id, storage: 'mongodb' });
+      return;
+    }
+
+    res.setHeader('Allow', 'GET, PUT, PATCH, DELETE');
     sendJson(res, 405, { error: 'Method not allowed.' });
   } catch (error) {
     resetMongoCacheIfClosed(error);
