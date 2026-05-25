@@ -35,6 +35,7 @@ const pdfLogoWidth = 132;
 const pdfLogoHeight = 56;
 const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
+const autosaveDelayMs = 900;
 
 const state = reactive({
   loading: true,
@@ -48,6 +49,7 @@ const state = reactive({
   recoveryStatus: '',
   lastSavedAt: '',
   lastSaveStatus: 'Not saved yet',
+  saveNotice: '',
   duplicateWarning: '',
   receiptQueue: [],
   receiptOcrRunning: false,
@@ -98,6 +100,7 @@ const mileageForm = reactive({
 });
 const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
 let gpsTimer = null;
+let autosaveTimer = null;
 const addressTimers = {};
 let routeMap = null;
 let routeLayer = null;
@@ -583,9 +586,32 @@ async function openProject(id) {
   saveLocalArchive();
 }
 
+function clearAutosaveTimer() {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+}
+
+function scheduleAutoSave() {
+  if (!state.currentProject || state.loading) return;
+  clearAutosaveTimer();
+  state.lastSaveStatus = 'Autosave pending...';
+  state.saveNotice = '';
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    saveCurrentProject({ autosave: true });
+  }, autosaveDelayMs);
+}
+
 async function saveCurrentProject(options = {}) {
-  const config = options && typeof options === 'object' && ('requireCloud' in options || 'verifyCloud' in options) ? options : {};
+  const config = options && typeof options === 'object' ? options : {};
   if (!state.currentProject) return;
+  if (config.autosave && state.saving) {
+    scheduleAutoSave();
+    return;
+  }
+
   state.currentProject.title = projectTitle();
   state.currentProject.updatedAt = new Date().toISOString();
   const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
@@ -597,12 +623,16 @@ async function saveCurrentProject(options = {}) {
     if (config.requireCloud) {
       state.error = 'This project is saved on this device only. Sync it to MongoDB from the Archive tab before using it across devices.';
       state.lastSaveStatus = 'MongoDB save not available for this device draft';
+    } else if (config.autosave) {
+      state.lastSaveStatus = 'Autosaved locally';
+      state.saveNotice = `Autosaved locally at ${formatDateTime(new Date())}`;
     }
     return;
   }
 
   try {
     state.saving = true;
+    if (config.autosave) state.lastSaveStatus = 'Autosaving...';
     const projectId = state.currentProject.id;
     const requestData = normalizeProjectData(state.currentProject.data);
     const expectedSignature = projectDataSignature({ id: projectId, data: requestData });
@@ -617,7 +647,7 @@ async function saveCurrentProject(options = {}) {
       throw new Error('MongoDB save was not confirmed by the server.');
     }
 
-    const successStatus = config.verifyCloud ? 'Verified in MongoDB' : 'Cloud saved';
+    const successStatus = config.verifyCloud ? 'Verified in MongoDB' : config.autosave ? 'Autosaved to MongoDB' : 'Cloud saved';
     if (config.verifyCloud) {
       const confirmed = await apiJson(`/api/projects/${projectId}`);
       if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
@@ -631,16 +661,19 @@ async function saveCurrentProject(options = {}) {
     saveLocalArchive();
     state.lastSavedAt = new Date().toISOString();
     state.lastSaveStatus = successStatus;
+    state.saveNotice = `${successStatus} at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
     if (!isPersistedMongoProject(state.currentProject)) state.storage = 'local';
     state.error = `Saved locally only. MongoDB save failed: ${error.message}`;
     state.lastSaveStatus = 'MongoDB save failed';
+    state.saveNotice = 'MongoDB save failed. Changes are cached on this device.';
   } finally {
     state.saving = false;
   }
 }
 
 async function saveDetailsToMongo() {
+  clearAutosaveTimer();
   await saveCurrentProject({ requireCloud: true, verifyCloud: true });
 }
 
@@ -2053,6 +2086,7 @@ watch(
 
 onMounted(initializeSecurity);
 onBeforeUnmount(() => {
+  clearAutosaveTimer();
   stopGpsTripWatcher();
   revokeReceiptPreview();
   if (routeMap) {
@@ -2117,6 +2151,7 @@ onBeforeUnmount(() => {
 
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
     <p v-if="state.duplicateWarning" class="status-message">{{ state.duplicateWarning }}</p>
+    <p v-if="state.saveNotice" class="save-toast" :class="{ failed: state.lastSaveStatus === 'MongoDB save failed' }">{{ state.saveNotice }}</p>
     <p v-if="state.loading" class="loading">Loading...</p>
 
     <section v-else-if="state.tab === 'dashboard'" class="dashboard-view">
@@ -2353,7 +2388,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
-      <form class="report-form" @change="saveCurrentProject" @submit.prevent="saveDetailsToMongo">
+      <form class="report-form" @input="scheduleAutoSave" @change="scheduleAutoSave" @submit.prevent="saveDetailsToMongo">
         <h2>Report details</h2>
         <input v-model="meta.clientName" placeholder="Client name" />
         <div class="inline-fields">
@@ -2408,7 +2443,7 @@ onBeforeUnmount(() => {
             <input v-model.number="report.remoteRate" type="number" min="0" step="0.01" placeholder="Remote daily rate" />
           </div>
         </div>
-        <p class="save-confirmation" :class="{ cloud: state.lastSaveStatus === 'Verified in MongoDB' || state.lastSaveStatus === 'Cloud saved', failed: state.lastSaveStatus === 'MongoDB save failed' }">
+        <p class="save-confirmation" :class="{ cloud: ['Verified in MongoDB', 'Cloud saved', 'Autosaved to MongoDB'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: state.lastSaveStatus === 'MongoDB save failed' }">
           {{ state.saving ? 'Saving to MongoDB...' : state.lastSaveStatus }}
         </p>
         <button type="submit" :disabled="state.saving">{{ state.saving ? 'Saving...' : 'Save details to MongoDB' }}</button>
@@ -2629,12 +2664,12 @@ onBeforeUnmount(() => {
               <tbody>
                 <tr v-for="row in data.mileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
                   <td>{{ row.trackingMode === 'gps' ? 'GPS' : row.calculationMode === 'address-route' ? 'Auto' : 'Manual' }}</td>
-                  <td><input class="table-input" v-model="row.date" type="date" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input" v-model="row.from" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input" v-model="row.to" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input" v-model="row.purpose" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.01" @change="saveCurrentProject" /></td>
-                  <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @change="saveCurrentProject" /></td>
+                  <td><input class="table-input" v-model="row.date" type="date" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.from" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.to" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input" v-model="row.purpose" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.01" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td>{{ money.format(row.miles * row.rate) }}</td>
                   <td>
                     <button v-if="rowRoutePoints(row).length" class="icon" type="button" @click="selectMileageRoute(row)">Map</button>

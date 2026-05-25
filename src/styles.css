@@ -247,6 +247,26 @@ h3 {
   font-weight: 700;
 }
 
+.save-toast {
+  margin:
+    0
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-right))
+    18px
+    max(clamp(16px, 4vw, 48px), env(safe-area-inset-left));
+  border: 1px solid #b7d8cb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #eefbf5;
+  color: #07553d;
+  font-weight: 800;
+}
+
+.save-toast.failed {
+  border-color: #e4c4c8;
+  background: #fff5f5;
+  color: #7a2731;
+}
+
 .archive-view {
   display: grid;
   gap: 16px;
@@ -588,6 +608,12 @@ h3 {
   border-color: #b7d8cb;
   background: #eefbf5;
   color: #07553d;
+}
+
+.save-confirmation.pending {
+  border-color: #e2d4a7;
+  background: #fff9e7;
+  color: #624a10;
 }
 
 .save-confirmation.failed {
