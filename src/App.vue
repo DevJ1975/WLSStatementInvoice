@@ -618,11 +618,17 @@ async function saveCurrentProject(options = {}) {
   if (index >= 0) state.projects[index] = state.currentProject;
   saveLocalArchive();
 
+  if (config.requireCloud && isDeviceDraft(state.currentProject)) {
+    await saveDeviceDraftToMongo(config);
+    return;
+  }
+
   const shouldAttemptCloud = (state.storage === 'mongodb' || isPersistedMongoProject(state.currentProject)) && !isDeviceDraft(state.currentProject);
   if (!shouldAttemptCloud) {
     if (config.requireCloud) {
-      state.error = 'This project is saved on this device only. Sync it to MongoDB from the Archive tab before using it across devices.';
-      state.lastSaveStatus = 'MongoDB save not available for this device draft';
+      state.error = 'Saved on this device. Cloud save is unavailable right now.';
+      state.lastSaveStatus = 'Saved locally';
+      state.saveNotice = `Saved locally at ${formatDateTime(new Date())}`;
     } else if (config.autosave) {
       state.lastSaveStatus = 'Autosaved locally';
       state.saveNotice = `Autosaved locally at ${formatDateTime(new Date())}`;
@@ -647,7 +653,7 @@ async function saveCurrentProject(options = {}) {
       throw new Error('MongoDB save was not confirmed by the server.');
     }
 
-    const successStatus = config.verifyCloud ? 'Verified in MongoDB' : config.autosave ? 'Autosaved to MongoDB' : 'Cloud saved';
+    const successStatus = config.autosave ? 'Autosaved' : 'Saved successfully';
     if (config.verifyCloud) {
       const confirmed = await apiJson(`/api/projects/${projectId}`);
       if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
@@ -667,6 +673,66 @@ async function saveCurrentProject(options = {}) {
     state.error = `Saved locally only. MongoDB save failed: ${error.message}`;
     state.lastSaveStatus = 'MongoDB save failed';
     state.saveNotice = 'MongoDB save failed. Changes are cached on this device.';
+  } finally {
+    state.saving = false;
+  }
+}
+
+async function saveDeviceDraftToMongo(config = {}) {
+  const draft = state.currentProject;
+  if (!draft) return;
+
+  try {
+    state.saving = true;
+    const title = (draft.title || projectTitle(draft)).replace(/\s+\(device draft\)$/, '');
+    const requestData = normalizeProjectData(draft.data);
+    const expectedSignature = projectDataSignature({ id: draft.id, data: requestData });
+    const targetId = draft.originalProjectId && !draft.originalProjectId.startsWith('local-') ? draft.originalProjectId : '';
+    let saved;
+
+    if (targetId) {
+      saved = await apiJson(`/api/projects/${targetId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ title, data: requestData }),
+      }).catch(() => null);
+    }
+
+    if (!saved) {
+      const created = await apiJson('/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({ title }),
+      });
+      saved = await apiJson(`/api/projects/${created.project.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ title, data: requestData }),
+      });
+    }
+
+    if (saved.storage !== 'mongodb' || saved.saved !== true) {
+      throw new Error('Cloud save was not confirmed by the server.');
+    }
+
+    if (config.verifyCloud) {
+      const confirmed = await apiJson(`/api/projects/${saved.project.id}`);
+      if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
+        throw new Error('Cloud verification did not match the saved document.');
+      }
+    }
+
+    const savedProject = normalizeProject(saved.project);
+    state.projects = [savedProject, ...state.projects.filter((project) => project.id !== draft.id && project.id !== savedProject.id)];
+    state.currentProject = savedProject;
+    state.storage = 'mongodb';
+    state.error = '';
+    refreshReceiptQueue();
+    saveLocalArchive();
+    state.lastSavedAt = new Date().toISOString();
+    state.lastSaveStatus = 'Saved successfully';
+    state.saveNotice = `Saved successfully at ${formatDateTime(state.lastSavedAt)}`;
+  } catch (error) {
+    state.error = `Saved locally only. Cloud save failed: ${error.message}`;
+    state.lastSaveStatus = 'Cloud save failed';
+    state.saveNotice = 'Cloud save failed. Changes are cached on this device.';
   } finally {
     state.saving = false;
   }
@@ -2151,7 +2217,7 @@ onBeforeUnmount(() => {
 
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
     <p v-if="state.duplicateWarning" class="status-message">{{ state.duplicateWarning }}</p>
-    <p v-if="state.saveNotice" class="save-toast" :class="{ failed: state.lastSaveStatus === 'MongoDB save failed' }">{{ state.saveNotice }}</p>
+    <p v-if="state.saveNotice" class="save-toast" :class="{ failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">{{ state.saveNotice }}</p>
     <p v-if="state.loading" class="loading">Loading...</p>
 
     <section v-else-if="state.tab === 'dashboard'" class="dashboard-view">
@@ -2443,10 +2509,10 @@ onBeforeUnmount(() => {
             <input v-model.number="report.remoteRate" type="number" min="0" step="0.01" placeholder="Remote daily rate" />
           </div>
         </div>
-        <p class="save-confirmation" :class="{ cloud: ['Verified in MongoDB', 'Cloud saved', 'Autosaved to MongoDB'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: state.lastSaveStatus === 'MongoDB save failed' }">
-          {{ state.saving ? 'Saving to MongoDB...' : state.lastSaveStatus }}
+        <p class="save-confirmation" :class="{ cloud: ['Saved successfully', 'Autosaved', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">
+          {{ state.saving ? 'Saving...' : state.lastSaveStatus }}
         </p>
-        <button type="submit" :disabled="state.saving">{{ state.saving ? 'Saving...' : 'Save details to MongoDB' }}</button>
+        <button type="submit" :disabled="state.saving">{{ state.saving ? 'Saving...' : 'Save' }}</button>
       </form>
 
       <div class="statement-sheet">
