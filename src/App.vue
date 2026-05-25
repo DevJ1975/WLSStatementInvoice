@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
+const entryDefaultsStorageKey = 'wls-entry-defaults-v1';
 const pinHashStorageKey = 'wls-app-pin-hash-v1';
 const deviceDraftPrefix = 'device-draft-';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
@@ -55,6 +56,7 @@ const state = reactive({
   receiptOcrRunning: false,
   receiptUploading: false,
   receiptDraft: emptyReceiptDraft(),
+  entryDefaults: blankEntryDefaults(),
   auth: {
     checked: false,
     unlocked: false,
@@ -91,6 +93,7 @@ const state = reactive({
 
 const routeMapEl = ref(null);
 const backupFileInput = ref(null);
+const receiptFileInput = ref(null);
 const expenseForm = reactive({ date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
 const mileageForm = reactive({
   date: '',
@@ -195,6 +198,8 @@ const workLogCategoryTotals = computed(() =>
     return totals;
   }, {})
 );
+const projectReviewItems = computed(() => buildProjectReviewItems(data.value));
+const receiptDraftMissingFields = computed(() => missingReceiptDraftFields());
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -206,6 +211,7 @@ function blankProjectData() {
       clientName: '',
       jobNumber: '',
       siteName: '',
+      siteAddress: '',
       poNumber: '',
       invoiceNumber: '',
       billingContact: '',
@@ -271,6 +277,28 @@ function emptyReceiptDraft() {
     previewUrl: '',
     originalSize: 0,
     compressedSize: 0,
+  };
+}
+
+function blankEntryDefaults() {
+  return {
+    employeeName: '',
+    address: '',
+    employeeId: '',
+    phone: '',
+    email: '',
+    mileageRate: '0.725',
+    startAddress: '',
+    clientName: '',
+    siteName: '',
+    siteAddress: '',
+    billingContact: '',
+    billingEmail: '',
+    recentVendors: [],
+    vendorCategories: {},
+    vendorPaymentMethods: {},
+    workCategories: [],
+    lastMileageRoute: null,
   };
 }
 
@@ -442,6 +470,267 @@ function categoryTotals(rows) {
   }, {});
 }
 
+function loadEntryDefaults() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(entryDefaultsStorageKey) || '{}');
+    return normalizeEntryDefaults(parsed);
+  } catch {
+    return blankEntryDefaults();
+  }
+}
+
+function normalizeEntryDefaults(defaults) {
+  const blank = blankEntryDefaults();
+  const source = defaults && typeof defaults === 'object' ? defaults : {};
+  return {
+    ...blank,
+    ...source,
+    mileageRate: source.mileageRate || blank.mileageRate,
+    recentVendors: Array.isArray(source.recentVendors) ? source.recentVendors.slice(0, 12) : [],
+    vendorCategories: source.vendorCategories && typeof source.vendorCategories === 'object' ? source.vendorCategories : {},
+    vendorPaymentMethods: source.vendorPaymentMethods && typeof source.vendorPaymentMethods === 'object' ? source.vendorPaymentMethods : {},
+    workCategories: Array.isArray(source.workCategories) ? source.workCategories.slice(0, 12) : [],
+    lastMileageRoute: source.lastMileageRoute || null,
+  };
+}
+
+function saveEntryDefaults() {
+  localStorage.setItem(entryDefaultsStorageKey, JSON.stringify(state.entryDefaults));
+}
+
+function vendorKey(vendor) {
+  return String(vendor || '').trim().toLowerCase();
+}
+
+function rememberRecent(list, value, limit = 12) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return list || [];
+  return [trimmed, ...(list || []).filter((item) => item.toLowerCase() !== trimmed.toLowerCase())].slice(0, limit);
+}
+
+function updateEntryDefaultsFromProject(project = state.currentProject) {
+  const projectData = project?.data || data.value;
+  const projectMeta = projectData.meta || {};
+  const projectReport = projectData.report || {};
+  Object.assign(state.entryDefaults, {
+    employeeName: projectReport.employeeName || state.entryDefaults.employeeName,
+    address: projectReport.address || state.entryDefaults.address,
+    employeeId: projectReport.employeeId || state.entryDefaults.employeeId,
+    phone: projectReport.phone || state.entryDefaults.phone,
+    email: projectReport.email || state.entryDefaults.email,
+    clientName: projectMeta.clientName || state.entryDefaults.clientName,
+    siteName: projectMeta.siteName || state.entryDefaults.siteName,
+    siteAddress: projectMeta.siteAddress || state.entryDefaults.siteAddress,
+    startAddress: projectReport.address || state.entryDefaults.startAddress,
+    billingContact: projectMeta.billingContact || state.entryDefaults.billingContact,
+    billingEmail: projectMeta.billingEmail || state.entryDefaults.billingEmail,
+  });
+  saveEntryDefaults();
+}
+
+function updateEntryDefaultsFromExpense(row, receipt = null) {
+  const key = vendorKey(row.vendor);
+  if (key) {
+    state.entryDefaults.recentVendors = rememberRecent(state.entryDefaults.recentVendors, row.vendor);
+    state.entryDefaults.vendorCategories[key] = row.category || state.entryDefaults.vendorCategories[key] || 'Misc.';
+    if (receipt?.paymentMethod) state.entryDefaults.vendorPaymentMethods[key] = receipt.paymentMethod;
+  }
+  saveEntryDefaults();
+}
+
+function updateEntryDefaultsFromMileage(row) {
+  if (row.rate) state.entryDefaults.mileageRate = String(row.rate);
+  state.entryDefaults.lastMileageRoute = {
+    from: row.from || '',
+    to: row.to || '',
+    purpose: row.purpose || '',
+    fromPlace: row.fromPlace || null,
+    toPlace: row.toPlace || null,
+    routeGeometry: row.routeGeometry || [],
+    routeDistanceMiles: row.routeDistanceMiles || row.miles || 0,
+    routeDurationSeconds: row.routeDurationSeconds || row.durationSeconds || 0,
+    calculationMode: row.calculationMode || 'manual',
+  };
+  saveEntryDefaults();
+}
+
+function updateEntryDefaultsFromWorkLog(row) {
+  if (row.clientSite) state.entryDefaults.clientName = row.clientSite;
+  if (row.location) state.entryDefaults.siteName = row.location;
+  state.entryDefaults.workCategories = rememberRecent(state.entryDefaults.workCategories, row.taskCategory);
+  saveEntryDefaults();
+}
+
+function isValidDateInput(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || '') && !Number.isNaN(new Date(`${value}T00:00:00`).getTime());
+}
+
+function weekdayCountInRange(from, to) {
+  if (!isValidDateInput(from) || !isValidDateInput(to)) return 0;
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+  if (start > end) return 0;
+  let count = 0;
+  for (const date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) count += 1;
+  }
+  return count;
+}
+
+function dateInsideRange(date, from, to) {
+  if (!isValidDateInput(date)) return true;
+  if (isValidDateInput(from) && date < from) return false;
+  if (isValidDateInput(to) && date > to) return false;
+  return true;
+}
+
+function dateIsWeekday(value) {
+  if (!isValidDateInput(value)) return false;
+  const day = new Date(`${value}T00:00:00`).getDay();
+  return day !== 0 && day !== 6;
+}
+
+function addDaysInput(value, days) {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return currentDateInputValue(date);
+}
+
+function nextWeekdayInPeriod(afterDate = '') {
+  const today = currentDateInputValue();
+  let candidate = afterDate && isValidDateInput(afterDate) ? addDaysInput(afterDate, 1) : report.value.periodFrom || today;
+  if (isValidDateInput(report.value.periodFrom) && candidate < report.value.periodFrom) candidate = report.value.periodFrom;
+  for (let index = 0; index < 45; index += 1) {
+    if (dateInsideRange(candidate, report.value.periodFrom, report.value.periodTo) && dateIsWeekday(candidate)) return candidate;
+    candidate = addDaysInput(candidate, 1);
+  }
+  return today;
+}
+
+function inferWorkCategoryForDate(date) {
+  if (dateInsideRange(date, report.value.onsiteFrom, report.value.onsiteTo) && report.value.onsiteFrom && report.value.onsiteTo) return 'Onsite work';
+  if (dateInsideRange(date, report.value.remoteFrom, report.value.remoteTo) && report.value.remoteFrom && report.value.remoteTo) return 'Remote work';
+  return state.entryDefaults.workCategories[0] || '';
+}
+
+function suggestNextSequence(values) {
+  const candidates = values
+    .filter(Boolean)
+    .map((value) => String(value).trim().match(/^(.*?)(\d+)(\D*)$/))
+    .filter(Boolean)
+    .map((match) => ({
+      prefix: match[1],
+      number: Number(match[2]),
+      width: match[2].length,
+      suffix: match[3],
+    }))
+    .filter((candidate) => Number.isFinite(candidate.number));
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => b.number - a.number);
+  const top = candidates[0];
+  return `${top.prefix}${String(top.number + 1).padStart(top.width, '0')}${top.suffix}`;
+}
+
+function applyProjectDefaults(project) {
+  const target = normalizeProject(project);
+  const targetMeta = target.data.meta;
+  const targetReport = target.data.report;
+  const defaults = state.entryDefaults;
+  targetMeta.clientName ||= defaults.clientName;
+  targetMeta.siteName ||= defaults.siteName;
+  targetMeta.siteAddress ||= defaults.siteAddress;
+  targetMeta.billingContact ||= defaults.billingContact;
+  targetMeta.billingEmail ||= defaults.billingEmail;
+  targetReport.employeeName ||= defaults.employeeName;
+  targetReport.address ||= defaults.address || defaults.startAddress;
+  targetReport.employeeId ||= defaults.employeeId;
+  targetReport.phone ||= defaults.phone;
+  targetReport.email ||= defaults.email;
+  targetReport.reportDate ||= currentDateInputValue();
+  targetReport.reportNo ||= suggestNextSequence(state.projects.map((item) => item.data?.report?.reportNo));
+  targetMeta.invoiceNumber ||= suggestNextSequence(state.projects.map((item) => item.data?.meta?.invoiceNumber));
+  return target;
+}
+
+function seedMileageForm() {
+  Object.assign(mileageForm, {
+    date: data.value.workLogs[data.value.workLogs.length - 1]?.date || currentDateInputValue(),
+    from: state.entryDefaults.startAddress || report.value.address || '',
+    to: '',
+    purpose: '',
+    miles: '',
+    rate: state.entryDefaults.mileageRate || '0.725',
+    fromPlace: null,
+    toPlace: null,
+    routeGeometry: [],
+    routeDistanceMiles: 0,
+    routeDurationSeconds: 0,
+    calculationMode: 'manual',
+  });
+}
+
+function seedWorkLogForm(afterDate = '') {
+  const nextDate = nextWeekdayInPeriod(afterDate || data.value.workLogs[data.value.workLogs.length - 1]?.date || '');
+  Object.assign(workLogForm, {
+    date: nextDate,
+    clientSite: meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName,
+    location: meta.value.siteName || meta.value.siteAddress || state.entryDefaults.siteName || state.entryDefaults.siteAddress,
+    taskCategory: inferWorkCategoryForDate(nextDate),
+    hours: '8',
+    summary: '',
+    actions: '',
+    status: 'Draft',
+  });
+}
+
+function buildProjectReviewItems(projectData) {
+  const items = [];
+  const required = [
+    ['missing', 'Client name is missing', projectData.meta.clientName],
+    ['missing', 'Employee name is missing', projectData.report.employeeName],
+    ['missing', 'Invoice/report number is missing', projectData.meta.invoiceNumber || projectData.report.reportNo],
+    ['missing', 'Report date is missing', projectData.report.reportDate],
+    ['missing', 'Period start is missing', projectData.report.periodFrom],
+    ['missing', 'Period end is missing', projectData.report.periodTo],
+  ];
+  required.forEach(([type, label, value]) => {
+    if (!value) items.push({ type, label });
+  });
+
+  projectData.expenseRows.forEach((row) => {
+    const hasReceipt = row.receiptId || projectData.receipts.some((receipt) => receipt.expenseId === row.id || receipt.id === row.receiptId);
+    if (!hasReceipt) items.push({ type: 'warning', label: `Expense missing receipt: ${row.vendor || row.description || row.date || 'Untitled expense'}` });
+  });
+
+  projectData.workLogs.forEach((row) => {
+    if (!dateInsideRange(row.date, projectData.report.periodFrom, projectData.report.periodTo)) {
+      items.push({ type: 'warning', label: `Work log date outside period: ${row.date}` });
+    }
+    if (!projectData.mileageRows.some((mileage) => mileage.date === row.date)) {
+      items.push({ type: 'warning', label: `Work log has no mileage for ${row.date}` });
+    }
+  });
+
+  projectData.mileageRows.forEach((row) => {
+    if (!dateInsideRange(row.date, projectData.report.periodFrom, projectData.report.periodTo)) {
+      items.push({ type: 'warning', label: `Mileage date outside period: ${row.date}` });
+    }
+  });
+
+  [
+    ['Onsite', projectData.report.onsiteFrom, projectData.report.onsiteTo, projectData.report.onsiteDays],
+    ['Remote', projectData.report.remoteFrom, projectData.report.remoteTo, projectData.report.remoteDays],
+  ].forEach(([label, from, to, days]) => {
+    const expected = weekdayCountInRange(from, to);
+    if (expected && Number(days || 0) !== expected) {
+      items.push({ type: 'warning', label: `${label} day count is ${days || 0}; weekday range is ${expected}` });
+    }
+  });
+
+  return items;
+}
+
 function loadLocalArchive() {
   try {
     const parsed = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
@@ -569,6 +858,8 @@ async function loadProjects() {
     state.projects = localArchive.projects.length ? localArchive.projects : [blankProject()];
     state.currentProject = state.projects.find((project) => project.id === localArchive.currentProjectId) || state.projects[0];
     refreshReceiptQueue();
+    seedMileageForm();
+    seedWorkLogForm();
     state.storage = 'local';
     state.error = 'Using local fallback. MongoDB sync is unavailable in this session.';
     saveLocalArchive();
@@ -601,14 +892,21 @@ async function createProject(title = 'Untitled expense project') {
       method: 'POST',
       body: JSON.stringify({ title }),
     });
-    state.projects = [normalizeProject(payload.project), ...state.projects];
-    await openProject(payload.project.id);
+    const project = applyProjectDefaults(payload.project);
+    state.projects = [project, ...state.projects];
+    state.currentProject = project;
+    seedMileageForm();
+    seedWorkLogForm();
+    refreshReceiptQueue();
+    await saveCurrentProject();
     return;
   }
 
-  const project = blankProject(title);
+  const project = applyProjectDefaults(blankProject(title));
   state.projects.unshift(project);
   state.currentProject = project;
+  seedMileageForm();
+  seedWorkLogForm();
   saveLocalArchive();
 }
 
@@ -620,12 +918,16 @@ async function openProject(id) {
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
     if (index >= 0) state.projects[index] = { ...state.projects[index], ...state.currentProject };
     refreshReceiptQueue();
+    seedMileageForm();
+    seedWorkLogForm();
     saveLocalArchive();
     return;
   }
 
   state.currentProject = state.projects.find((project) => project.id === id) || state.projects[0];
   refreshReceiptQueue();
+  seedMileageForm();
+  seedWorkLogForm();
   saveLocalArchive();
 }
 
@@ -667,6 +969,7 @@ async function saveCurrentProject(options = {}) {
 
   const shouldAttemptCloud = (state.storage === 'mongodb' || isPersistedMongoProject(state.currentProject)) && !isDeviceDraft(state.currentProject);
   if (!shouldAttemptCloud) {
+    updateEntryDefaultsFromProject();
     saveLocalArchive({ defer: Boolean(config.autosave) });
     if (config.requireCloud) {
       state.error = 'Saved on this device. Cloud save is unavailable right now.';
@@ -707,12 +1010,14 @@ async function saveCurrentProject(options = {}) {
     state.currentProject = normalizeProject(payload.project);
     state.storage = 'mongodb';
     state.error = '';
+    updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
     state.lastSavedAt = new Date().toISOString();
     state.lastSaveStatus = successStatus;
     state.saveNotice = `${successStatus} at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
     if (!isPersistedMongoProject(state.currentProject)) state.storage = 'local';
+    updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
     state.error = `Saved locally only. MongoDB save failed: ${error.message}`;
     state.lastSaveStatus = 'MongoDB save failed';
@@ -769,6 +1074,7 @@ async function saveDeviceDraftToMongo(config = {}) {
     state.storage = 'mongodb';
     state.error = '';
     refreshReceiptQueue();
+    updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
     state.lastSavedAt = new Date().toISOString();
     state.lastSaveStatus = 'Saved successfully';
@@ -1141,7 +1447,10 @@ async function resetToBlankTemplate() {
   stopGpsTripWatcher();
   state.currentProject.data = blankProjectData();
   state.currentProject.title = 'Untitled expense project';
+  state.currentProject = applyProjectDefaults(state.currentProject);
   state.gps.selectedMileageId = '';
+  seedMileageForm();
+  seedWorkLogForm();
   await saveCurrentProject();
 }
 
@@ -1180,7 +1489,8 @@ async function addExpense() {
   if (warnDuplicateExpense(row) && !window.confirm('This looks like a duplicate expense. Add it anyway?')) return;
   data.value.expenseRows.push(row);
   state.duplicateWarning = '';
-  Object.assign(expenseForm, { date: '', vendor: '', description: '', category: 'Hotel', amount: '' });
+  updateEntryDefaultsFromExpense(row);
+  Object.assign(expenseForm, { date: row.date || currentDateInputValue(), vendor: '', description: '', category: row.category || 'Hotel', amount: '' });
   await saveCurrentProject();
 }
 
@@ -1209,25 +1519,13 @@ async function addMileage() {
   if (warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
   data.value.mileageRows.push(row);
   state.duplicateWarning = '';
+  updateEntryDefaultsFromMileage(row);
   resetMileageForm();
   await saveCurrentProject();
 }
 
 function resetMileageForm() {
-  Object.assign(mileageForm, {
-    date: '',
-    from: '',
-    to: '',
-    purpose: '',
-    miles: '',
-    rate: '0.725',
-    fromPlace: null,
-    toPlace: null,
-    routeGeometry: [],
-    routeDistanceMiles: 0,
-    routeDurationSeconds: 0,
-    calculationMode: 'manual',
-  });
+  seedMileageForm();
   state.places.fromSuggestions = [];
   state.places.toSuggestions = [];
 }
@@ -1240,6 +1538,12 @@ function clearAddressRoute() {
   if (state.gps.selectedMileageId === 'draft-route') {
     state.gps.selectedMileageId = '';
   }
+}
+
+function handleLaborDateChange(kind) {
+  const count = weekdayCountInRange(report.value[`${kind}From`], report.value[`${kind}To`]);
+  if (count) report.value[`${kind}Days`] = count;
+  scheduleAutoSave();
 }
 
 function handleAddressInput(field) {
@@ -1257,6 +1561,12 @@ function handleAddressInput(field) {
   }
 
   addressTimers[field] = setTimeout(() => fetchAddressSuggestions(field, text), 350);
+}
+
+async function resolvePlaceFromText(text) {
+  if (!text || text.trim().length < 3) return null;
+  const payload = await apiJson(`/api/places/autocomplete?text=${encodeURIComponent(text.trim())}`);
+  return normalizePlace(payload.suggestions?.[0]);
 }
 
 async function fetchAddressSuggestions(field, text) {
@@ -1316,6 +1626,73 @@ async function calculateAddressMileage() {
   } finally {
     state.places.routeLoading = false;
   }
+}
+
+async function applyQuickMileageRoute(direction) {
+  const start = state.entryDefaults.startAddress || report.value.address || '';
+  const site = meta.value.siteAddress || meta.value.siteName || state.entryDefaults.siteAddress || state.entryDefaults.siteName || '';
+  const fromText = direction === 'site-to-start' ? site : start;
+  const toText = direction === 'site-to-start' ? start : site;
+
+  Object.assign(mileageForm, {
+    date: mileageForm.date || data.value.workLogs[data.value.workLogs.length - 1]?.date || currentDateInputValue(),
+    from: fromText,
+    to: toText,
+    purpose: direction === 'site-to-start' ? 'Return from site' : 'Travel to site',
+    rate: state.entryDefaults.mileageRate || mileageForm.rate || '0.725',
+    fromPlace: null,
+    toPlace: null,
+  });
+  clearAddressRoute();
+
+  if (!fromText || !toText) {
+    state.places.error = 'Add a home/start address and site address to use quick routes.';
+    return;
+  }
+
+  try {
+    state.places.routeLoading = true;
+    mileageForm.fromPlace = await resolvePlaceFromText(fromText);
+    mileageForm.toPlace = await resolvePlaceFromText(toText);
+    if (!mileageForm.fromPlace || !mileageForm.toPlace) throw new Error('Address lookup did not find both route endpoints.');
+    await calculateAddressMileage();
+  } catch (error) {
+    state.places.error = `${error.message || 'Quick route lookup failed.'} You can still enter miles manually.`;
+  } finally {
+    state.places.routeLoading = false;
+  }
+}
+
+function repeatLastMileageRoute() {
+  const route = state.entryDefaults.lastMileageRoute;
+  if (!route) {
+    state.places.error = 'No prior route has been saved on this device yet.';
+    return;
+  }
+
+  Object.assign(mileageForm, {
+    date: data.value.workLogs[data.value.workLogs.length - 1]?.date || currentDateInputValue(),
+    from: route.from || '',
+    to: route.to || '',
+    purpose: route.purpose || 'Repeat route',
+    miles: route.routeDistanceMiles || '',
+    rate: state.entryDefaults.mileageRate || mileageForm.rate || '0.725',
+    fromPlace: route.fromPlace || null,
+    toPlace: route.toPlace || null,
+    routeGeometry: Array.isArray(route.routeGeometry) ? route.routeGeometry.map(normalizeRoutePoint) : [],
+    routeDistanceMiles: route.routeDistanceMiles || 0,
+    routeDurationSeconds: route.routeDurationSeconds || 0,
+    calculationMode: route.calculationMode || (route.routeGeometry?.length ? 'address-route' : 'manual'),
+  });
+  state.gps.selectedMileageId = mileageForm.routeGeometry.length ? 'draft-route' : '';
+  state.places.error = '';
+}
+
+function goToEntry(tab, mode = '') {
+  state.tab = tab;
+  if (tab === 'expenses' && mode === 'receipt') nextTick(() => receiptFileInput.value?.click());
+  if (tab === 'mileage' && !mileageForm.date) seedMileageForm();
+  if (tab === 'worklog' && !workLogForm.date) seedWorkLogForm();
 }
 
 function currentDateInputValue(date = new Date()) {
@@ -1476,6 +1853,7 @@ async function stopGpsTrip() {
   state.gps.selectedMileageId = row.id;
   state.gps.routePoints = [];
   state.gps.error = '';
+  updateEntryDefaultsFromMileage(row);
   await saveCurrentProject();
 }
 
@@ -1495,7 +1873,7 @@ function selectMileageRoute(row) {
 }
 
 async function addWorkLog() {
-  data.value.workLogs.push({
+  const row = {
     id: newId(),
     date: workLogForm.date,
     clientSite: workLogForm.clientSite.trim(),
@@ -1505,9 +1883,68 @@ async function addWorkLog() {
     summary: workLogForm.summary.trim(),
     actions: workLogForm.actions.trim(),
     status: workLogForm.status.trim(),
-  });
-  Object.assign(workLogForm, { date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
+  };
+  data.value.workLogs.push(row);
+  updateEntryDefaultsFromWorkLog(row);
+  seedWorkLogForm(row.date);
   await saveCurrentProject();
+}
+
+function datesForWeekdayRange(from, to) {
+  if (!isValidDateInput(from) || !isValidDateInput(to)) return [];
+  const dates = [];
+  for (let cursor = from; cursor <= to; cursor = addDaysInput(cursor, 1)) {
+    if (dateIsWeekday(cursor)) dates.push(cursor);
+  }
+  return dates;
+}
+
+async function generateWorkLogDrafts() {
+  const existingDates = new Set(data.value.workLogs.map((row) => row.date));
+  const draftRows = [];
+  const groups = [
+    {
+      from: report.value.onsiteFrom,
+      to: report.value.onsiteTo,
+      taskCategory: 'Onsite work',
+      summary: report.value.onsiteDescription || 'Onsite work',
+    },
+    {
+      from: report.value.remoteFrom,
+      to: report.value.remoteTo,
+      taskCategory: 'Remote work',
+      summary: report.value.remoteDescription || 'Remote work',
+    },
+  ];
+
+  groups.forEach((group) => {
+    datesForWeekdayRange(group.from, group.to).forEach((date) => {
+      if (existingDates.has(date)) return;
+      existingDates.add(date);
+      draftRows.push({
+        id: newId(),
+        date,
+        clientSite: meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName,
+        location: meta.value.siteName || meta.value.siteAddress || state.entryDefaults.siteName || state.entryDefaults.siteAddress,
+        taskCategory: group.taskCategory,
+        hours: 8,
+        summary: group.summary,
+        actions: '',
+        status: 'Draft',
+      });
+    });
+  });
+
+  if (!draftRows.length) {
+    state.error = 'No new weekday work log drafts were available from the onsite/remote date ranges.';
+    return;
+  }
+
+  data.value.workLogs.push(...draftRows);
+  draftRows.forEach(updateEntryDefaultsFromWorkLog);
+  seedWorkLogForm(draftRows[draftRows.length - 1].date);
+  await saveCurrentProject();
+  state.saveNotice = `${draftRows.length} work log draft${draftRows.length === 1 ? '' : 's'} generated.`;
 }
 
 async function removeRow(collection, id) {
@@ -1580,13 +2017,14 @@ function parseReceiptText(text) {
   const date = extractReceiptDate(normalizedText);
   const vendor = extractReceiptVendor(lines);
   const paymentMethod = extractPaymentMethod(normalizedText);
+  const key = vendorKey(vendor);
 
   return {
     vendor,
     date,
     amount,
-    category: guessCategory(normalizedText),
-    paymentMethod,
+    category: (key && state.entryDefaults.vendorCategories[key]) || guessCategory(normalizedText),
+    paymentMethod: (key && state.entryDefaults.vendorPaymentMethods[key]) || paymentMethod,
     notes: buildReceiptNotes(lines, { vendor, date, amount, paymentMethod }),
   };
 }
@@ -1823,6 +2261,7 @@ async function hashPin(pin) {
 }
 
 async function initializeSecurity() {
+  state.entryDefaults = loadEntryDefaults();
   state.auth.hasPin = Boolean(localStorage.getItem(pinHashStorageKey));
   state.auth.unlocked = !state.auth.hasPin;
   state.auth.checked = true;
@@ -1878,6 +2317,14 @@ function receiptCompressionText() {
   return `Compressed from ${formatBytes(original)} to ${formatBytes(compressed)} before upload.`;
 }
 
+function missingReceiptDraftFields() {
+  const missing = [];
+  if (!state.receiptDraft.vendor?.trim()) missing.push('vendor');
+  if (!state.receiptDraft.date) missing.push('date');
+  if (!Number(state.receiptDraft.amount || 0)) missing.push('amount');
+  return missing;
+}
+
 function revokeReceiptPreview() {
   if (state.receiptDraft.previewUrl) URL.revokeObjectURL(state.receiptDraft.previewUrl);
 }
@@ -1902,6 +2349,10 @@ function loadImage(src) {
 
 async function saveReceiptDraft() {
   if (!state.receiptDraft.imageBlob || !state.currentProject) return;
+  if (receiptDraftMissingFields.value.length) {
+    state.error = `Receipt needs ${receiptDraftMissingFields.value.join(', ')} before saving.`;
+    return;
+  }
   state.receiptUploading = true;
 
   try {
@@ -1929,6 +2380,7 @@ async function saveReceiptDraft() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Receipt upload failed.');
       state.currentProject = normalizeProject(payload.project);
+      updateEntryDefaultsFromExpense(payload.expense, payload.receipt);
     } else {
       await addReceiptDraftLocally();
     }
@@ -2008,6 +2460,7 @@ async function addReceiptDraftLocally(reason = '') {
       createdAt: receipt.createdAt,
     });
   }
+  updateEntryDefaultsFromExpense(expense, receipt);
   await saveCurrentProject();
 }
 
@@ -2448,6 +2901,25 @@ onBeforeUnmount(() => {
           <p><span>Receipts Queued</span><strong>{{ state.receiptQueue.length }}</strong></p>
         </div>
       </div>
+
+      <div class="dashboard-panel quick-entry-panel">
+        <div class="sheet-title-row"><span>Quick entry</span><strong>{{ projectReviewItems.length ? `${projectReviewItems.length} review items` : 'Ready' }}</strong></div>
+        <div class="quick-entry-actions">
+          <button type="button" @click="goToEntry('expenses', 'receipt')">Capture receipt</button>
+          <button class="secondary" type="button" @click="goToEntry('mileage')">Add mileage</button>
+          <button class="secondary" type="button" @click="goToEntry('worklog')">Add work log</button>
+          <button class="secondary" type="button" @click="saveDetailsToMongo">Save</button>
+          <button class="secondary" type="button" @click="openPrintView">Print</button>
+          <button class="secondary" type="button" @click="exportPdf(false)">PDF</button>
+        </div>
+        <div class="review-checklist">
+          <h3>Project checklist</h3>
+          <p v-if="!projectReviewItems.length" class="muted">No review items found.</p>
+          <ul v-else>
+            <li v-for="item in projectReviewItems.slice(0, 8)" :key="item.label" :class="item.type">{{ item.label }}</li>
+          </ul>
+        </div>
+      </div>
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'print'" class="print-view">
@@ -2673,6 +3145,7 @@ onBeforeUnmount(() => {
           <input v-model="meta.poNumber" placeholder="PO number" spellcheck="false" />
         </div>
         <input v-model="meta.siteName" placeholder="Site / location name" />
+        <input v-model="meta.siteAddress" placeholder="Site address for mileage" />
         <div class="inline-fields">
           <input v-model="meta.invoiceNumber" placeholder="Invoice number" spellcheck="false" />
           <input v-model="meta.billingContact" placeholder="Billing contact" />
@@ -2699,8 +3172,8 @@ onBeforeUnmount(() => {
         <div class="labor-entry">
           <h3>Onsite Work</h3>
           <div class="inline-fields">
-            <input v-model="report.onsiteFrom" type="date" />
-            <input v-model="report.onsiteTo" type="date" />
+            <input v-model="report.onsiteFrom" type="date" @change="handleLaborDateChange('onsite')" />
+            <input v-model="report.onsiteTo" type="date" @change="handleLaborDateChange('onsite')" />
           </div>
           <input v-model="report.onsiteDescription" placeholder="Onsite work description" />
           <div class="inline-fields compact">
@@ -2711,8 +3184,8 @@ onBeforeUnmount(() => {
         <div class="labor-entry">
           <h3>Remote Work</h3>
           <div class="inline-fields">
-            <input v-model="report.remoteFrom" type="date" />
-            <input v-model="report.remoteTo" type="date" />
+            <input v-model="report.remoteFrom" type="date" @change="handleLaborDateChange('remote')" />
+            <input v-model="report.remoteTo" type="date" @change="handleLaborDateChange('remote')" />
           </div>
           <input v-model="report.remoteDescription" placeholder="Remote work description" />
           <div class="inline-fields compact">
@@ -2790,7 +3263,7 @@ onBeforeUnmount(() => {
             <strong>{{ state.receiptQueue.length }} receipt{{ state.receiptQueue.length === 1 ? '' : 's' }} saved locally</strong>
             <span>They will be included in the device draft backup until synced.</span>
           </div>
-          <input type="file" accept="image/*" capture="environment" spellcheck="false" @change="handleReceiptFile" />
+          <input ref="receiptFileInput" type="file" accept="image/*" capture="environment" spellcheck="false" @change="handleReceiptFile" />
           <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
           <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
           <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
@@ -2802,7 +3275,10 @@ onBeforeUnmount(() => {
           <input v-model="state.receiptDraft.amount" type="number" min="0" step="0.01" placeholder="Amount" />
           <input v-model="state.receiptDraft.paymentMethod" placeholder="Payment method" />
           <textarea v-model="state.receiptDraft.notes" placeholder="Notes"></textarea>
-          <button type="submit" :disabled="!state.receiptDraft.imageBlob || state.receiptUploading">
+          <p v-if="state.receiptDraft.imageBlob && receiptDraftMissingFields.length" class="status-message gps-message">
+            Missing {{ receiptDraftMissingFields.join(', ') }} before saving.
+          </p>
+          <button type="submit" :disabled="!state.receiptDraft.imageBlob || state.receiptUploading || receiptDraftMissingFields.length">
             {{ state.receiptUploading ? 'Saving receipt...' : 'Save receipt and expense' }}
           </button>
         </form>
@@ -2860,6 +3336,11 @@ onBeforeUnmount(() => {
       <div class="form-stack">
         <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addMileage">
           <h2>Add mileage</h2>
+          <div class="quick-route-actions">
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('start-to-site')">Start -> Site</button>
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('site-to-start')">Site -> Start</button>
+            <button class="secondary" type="button" @click="repeatLastMileageRoute">Repeat last route</button>
+          </div>
           <input v-model="mileageForm.date" type="date" required />
           <div class="address-field">
             <input
@@ -2989,7 +3470,8 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'worklog'" class="workbook-view">
       <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addWorkLog">
         <h2>Add work log</h2>
-        <input v-model="workLogForm.date" type="date" required />
+        <button class="secondary" type="button" @click="generateWorkLogDrafts">Generate work log drafts</button>
+        <input v-model="workLogForm.date" type="date" required @change="workLogForm.taskCategory = inferWorkCategoryForDate(workLogForm.date)" />
         <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
         <input v-model="workLogForm.location" placeholder="Location" />
         <input v-model="workLogForm.taskCategory" placeholder="Task category" />

@@ -457,6 +457,48 @@ h3 {
   font-size: 26px;
 }
 
+.quick-entry-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.quick-entry-actions,
+.quick-route-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.review-checklist {
+  display: grid;
+  gap: 8px;
+}
+
+.review-checklist h3,
+.review-checklist ul {
+  margin: 0;
+}
+
+.review-checklist ul {
+  display: grid;
+  gap: 6px;
+  padding-left: 18px;
+}
+
+.review-checklist li {
+  color: #4b5a60;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.review-checklist li.missing {
+  color: #7a2731;
+}
+
+.review-checklist li.warning {
+  color: #6b4a00;
+}
+
 .print-view,
 .quickbooks-view {
   display: grid;
