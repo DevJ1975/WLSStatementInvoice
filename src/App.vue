@@ -4,6 +4,8 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
+const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
+const deviceDraftPrefix = 'device-draft-';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
 const tabs = [
   ['archive', 'Archive'],
@@ -88,7 +90,7 @@ const totalHours = computed(() => data.value.workLogs.reduce((sum, row) => sum +
 const avgHours = computed(() => (data.value.workLogs.length ? totalHours.value / data.value.workLogs.length : 0));
 const expenseCategoryTotals = computed(() => categoryTotals(data.value.expenseRows));
 const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => rowRoutePoints(row).length));
-const localProjectCount = computed(() => state.projects.filter((project) => project.id.startsWith('local-')).length);
+const localProjectCount = computed(() => deviceDraftProjects().length);
 const selectedMileageRoute = computed(() => {
   if (state.gps.selectedMileageId === 'draft-route') return null;
   return routeMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || routeMileageRows.value[0] || null;
@@ -236,6 +238,57 @@ function normalizeProject(project) {
   };
 }
 
+function isDeviceDraft(project) {
+  return project?.id?.startsWith('local-') || project?.id?.startsWith(deviceDraftPrefix);
+}
+
+function deviceDraftProjects() {
+  return state.projects.filter(isDeviceDraft);
+}
+
+function projectHasUserData(project) {
+  const projectData = project?.data || {};
+  const projectReport = projectData.report || {};
+  return Boolean(
+    Object.values(projectReport).some((value) => value !== '' && value !== 0 && value != null) ||
+      projectData.expenseRows?.length ||
+      projectData.mileageRows?.length ||
+      projectData.workLogs?.length ||
+      projectData.receipts?.length
+  );
+}
+
+function projectDataSignature(project) {
+  return JSON.stringify(normalizeProject(project).data);
+}
+
+function deviceDraftId(project) {
+  if (project.id?.startsWith(deviceDraftPrefix)) return project.id;
+  return project.id?.startsWith('local-') ? project.id : `${deviceDraftPrefix}${project.id || newId()}`;
+}
+
+function asDeviceDraft(project) {
+  const originalProjectId = project.originalProjectId || (project.id?.startsWith(deviceDraftPrefix) ? project.id.slice(deviceDraftPrefix.length) : project.id);
+  const title = (project.title || projectTitle(project)).replace(/\s+\(device draft\)$/, '');
+  return {
+    ...normalizeProject(project),
+    id: deviceDraftId(project),
+    title: `${title} (device draft)`,
+    originalProjectId,
+  };
+}
+
+function uniqueProjects(projects) {
+  const seen = new Set();
+  return projects.filter((project) => {
+    const normalized = normalizeProject(project);
+    const key = `${normalized.id}:${projectDataSignature(normalized)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function projectTitle(project = state.currentProject) {
   if (!project) return 'Untitled expense project';
   const projectReport = project.data?.report || {};
@@ -259,14 +312,41 @@ function categoryTotals(rows) {
 function loadLocalArchive() {
   try {
     const parsed = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
-    const projects = Array.isArray(parsed.projects) ? parsed.projects.map(normalizeProject) : [];
+    const backups = JSON.parse(localStorage.getItem(archiveBackupStorageKey) || '[]');
+    const backupProjects = Array.isArray(backups)
+      ? backups.flatMap((backup) => (Array.isArray(backup.projects) ? backup.projects : []))
+      : [];
+    const projects = uniqueProjects([...(Array.isArray(parsed.projects) ? parsed.projects : []), ...backupProjects]).map(normalizeProject);
     return { projects, currentProjectId: parsed.currentProjectId || projects[0]?.id || '' };
   } catch {
     return { projects: [], currentProjectId: '' };
   }
 }
 
+function preserveDeviceDrafts(projects) {
+  const drafts = projects.filter(projectHasUserData).map(asDeviceDraft);
+  if (!drafts.length) return;
+
+  const existing = JSON.parse(localStorage.getItem(archiveBackupStorageKey) || '[]');
+  const backups = Array.isArray(existing) ? existing : [];
+  backups.unshift({
+    savedAt: new Date().toISOString(),
+    projects: drafts,
+  });
+  localStorage.setItem(archiveBackupStorageKey, JSON.stringify(backups.slice(0, 10)));
+}
+
 function saveLocalArchive() {
+  try {
+    const existing = JSON.parse(localStorage.getItem(archiveStorageKey) || '{}');
+    const existingProjects = Array.isArray(existing.projects) ? existing.projects : [];
+    const currentSignatures = new Set(state.projects.map((project) => `${project.id}:${projectDataSignature(project)}`));
+    const draftsToPreserve = existingProjects.filter((project) => projectHasUserData(project) && !currentSignatures.has(`${project.id}:${projectDataSignature(project)}`));
+    preserveDeviceDrafts(draftsToPreserve);
+  } catch {
+    // Best effort backup only.
+  }
+
   localStorage.setItem(
     archiveStorageKey,
     JSON.stringify({
@@ -296,23 +376,29 @@ async function loadProjects() {
   state.loading = true;
   state.error = '';
   const localArchive = loadLocalArchive();
-  const localOnlyProjects = localArchive.projects.filter((project) => project.id.startsWith('local-'));
 
   try {
     const payload = await apiJson('/api/projects');
-    state.projects = [...payload.projects.map(normalizeProject), ...localOnlyProjects];
+    const cloudProjects = payload.projects.map(normalizeProject);
+    const cloudSignatures = new Map(cloudProjects.map((project) => [project.id, projectDataSignature(project)]));
+    const deviceDrafts = localArchive.projects
+      .filter(projectHasUserData)
+      .filter((project) => isDeviceDraft(project) || cloudSignatures.get(project.id) !== projectDataSignature(project))
+      .map(asDeviceDraft);
+
+    state.projects = uniqueProjects([...cloudProjects, ...deviceDrafts]).map(normalizeProject);
     state.storage = 'mongodb';
 
-    if (localOnlyProjects.length) {
-      state.error = `${localOnlyProjects.length} local project${localOnlyProjects.length === 1 ? '' : 's'} found on this device. Sync local projects to cloud before switching devices.`;
+    if (deviceDrafts.length) {
+      state.error = `${deviceDrafts.length} device draft${deviceDrafts.length === 1 ? '' : 's'} found. Sync device drafts to cloud before switching devices.`;
     }
 
-    if (!payload.projects.length && !localOnlyProjects.length) {
+    if (!cloudProjects.length && !deviceDrafts.length) {
       await createProject('Untitled expense project');
-    } else if (localArchive.currentProjectId?.startsWith('local-') && localOnlyProjects.some((project) => project.id === localArchive.currentProjectId)) {
-      await openProject(localArchive.currentProjectId);
+    } else if (deviceDrafts.some((project) => project.originalProjectId === localArchive.currentProjectId || project.id === localArchive.currentProjectId)) {
+      await openProject(deviceDrafts.find((project) => project.originalProjectId === localArchive.currentProjectId || project.id === localArchive.currentProjectId).id);
     } else {
-      await openProject(payload.projects[0]?.id || state.projects[0].id);
+      await openProject(cloudProjects[0]?.id || state.projects[0].id);
     }
   } catch {
     state.projects = localArchive.projects.length ? localArchive.projects : [blankProject()];
@@ -344,7 +430,7 @@ async function createProject(title = 'Untitled expense project') {
 
 async function openProject(id) {
   stopGpsTripWatcher();
-  if (state.storage === 'mongodb' && !id.startsWith('local-')) {
+  if (state.storage === 'mongodb' && !isDeviceDraft({ id })) {
     const payload = await apiJson(`/api/projects/${id}`);
     state.currentProject = normalizeProject(payload.project);
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
@@ -365,7 +451,7 @@ async function saveCurrentProject() {
   if (index >= 0) state.projects[index] = state.currentProject;
   saveLocalArchive();
 
-  if (state.storage !== 'mongodb' || state.currentProject.id.startsWith('local-')) return;
+  if (state.storage !== 'mongodb' || isDeviceDraft(state.currentProject)) return;
 
   try {
     state.saving = true;
@@ -388,24 +474,38 @@ async function saveCurrentProject() {
 }
 
 async function syncLocalProjectsToCloud() {
-  const localProjects = state.projects.filter((project) => project.id.startsWith('local-'));
+  const localProjects = deviceDraftProjects();
   if (!localProjects.length) return;
 
   state.syncingLocal = true;
   try {
     const replacements = new Map();
     for (const project of localProjects) {
-      const created = await apiJson('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({ title: project.title || projectTitle(project) }),
-      });
-      const saved = await apiJson(`/api/projects/${created.project.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          title: project.title || projectTitle(project),
-          data: project.data,
-        }),
-      });
+      const title = (project.title || projectTitle(project)).replace(/\s+\(device draft\)$/, '');
+      const targetId = project.originalProjectId && !project.originalProjectId.startsWith('local-') ? project.originalProjectId : '';
+      let saved;
+      if (targetId) {
+        saved = await apiJson(`/api/projects/${targetId}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            title,
+            data: project.data,
+          }),
+        }).catch(() => null);
+      }
+      if (!saved) {
+        const created = await apiJson('/api/projects', {
+          method: 'POST',
+          body: JSON.stringify({ title }),
+        });
+        saved = await apiJson(`/api/projects/${created.project.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            title,
+            data: project.data,
+          }),
+        });
+      }
       replacements.set(project.id, normalizeProject(saved.project));
     }
 
@@ -426,7 +526,7 @@ async function syncLocalProjectsToCloud() {
 }
 
 async function patchProject(project, patch) {
-  if (state.storage === 'mongodb' && !project.id.startsWith('local-')) {
+  if (state.storage === 'mongodb' && !isDeviceDraft(project)) {
     const payload = await apiJson(`/api/projects/${project.id}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
@@ -461,7 +561,7 @@ async function deleteProject(project) {
   const title = projectTitle(project);
   if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return;
 
-  if (state.storage === 'mongodb' && !project.id.startsWith('local-')) {
+  if (state.storage === 'mongodb' && !isDeviceDraft(project)) {
     await apiJson(`/api/projects/${project.id}`, { method: 'DELETE' });
   }
 
