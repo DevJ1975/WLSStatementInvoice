@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { normalizeProjectData, projectPayload } = require('../../_lib/data');
 const { getProjectsCollection, getReceiptsBucket, resetMongoCacheIfClosed, toObjectId } = require('../../_lib/mongo');
 const { sendJson } = require('../../_lib/http');
+const { projectAccessFilter, requireAuth, siteId } = require('../../_lib/project-auth');
 
 const receiptUploadLimitBytes = 3 * 1024 * 1024;
 
@@ -55,6 +56,9 @@ function parseMultipart(req) {
 
 async function handler(req, res) {
   try {
+    const member = await requireAuth(req, res);
+    if (!member) return;
+
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
       sendJson(res, 405, { error: 'Method not allowed.' });
@@ -76,7 +80,7 @@ async function handler(req, res) {
 
     const metadata = JSON.parse(fields.metadata || '{}');
     const collection = await getProjectsCollection();
-    const project = await collection.findOne({ _id });
+    const project = await collection.findOne(projectAccessFilter(member, _id));
     if (!project) {
       sendJson(res, 404, { error: 'Project not found.' });
       return;
@@ -132,16 +136,18 @@ async function handler(req, res) {
     data.expenseRows.push(expense);
 
     await collection.updateOne(
-      { _id },
+      projectAccessFilter(member, _id),
       {
         $set: {
+          siteId,
           data,
+          updatedBy: member.id,
           updatedAt: new Date(),
         },
       }
     );
 
-    const updated = await collection.findOne({ _id });
+    const updated = await collection.findOne(projectAccessFilter(member, _id));
     sendJson(res, 201, { project: projectPayload(updated), receipt, expense, storage: 'mongodb' });
   } catch (error) {
     resetMongoCacheIfClosed(error);

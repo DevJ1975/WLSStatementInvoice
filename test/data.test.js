@@ -91,6 +91,10 @@ test('projectSummary and projectPayload expose normalized project fields', () =>
 
   assert.deepEqual(projectSummary(project), {
     id: 'project-1',
+    siteId: 'default',
+    memberId: '',
+    createdBy: '',
+    updatedBy: '',
     title: 'Report 35-SK - Jamil Jones - 2026-05-01 to 2026-05-24',
     status: 'archived',
     reportNo: '35-SK',

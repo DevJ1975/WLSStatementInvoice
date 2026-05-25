@@ -195,6 +195,10 @@ function projectSummary(project) {
 
   return {
     id: String(project._id),
+    siteId: project.siteId || 'default',
+    memberId: project.memberId || '',
+    createdBy: project.createdBy || '',
+    updatedBy: project.updatedBy || '',
     title: deriveProjectTitle({ ...project, data }),
     status: project.status || 'active',
     reportNo: data.report.reportNo || '',

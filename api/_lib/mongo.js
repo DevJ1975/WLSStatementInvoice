@@ -48,6 +48,16 @@ async function getProjectsCollection() {
   return db.collection(process.env.MONGODB_PROJECTS_COLLECTION || 'projects');
 }
 
+async function getMembersCollection() {
+  const db = await getDb();
+  return db.collection(process.env.MONGODB_MEMBERS_COLLECTION || 'members');
+}
+
+async function getSessionsCollection() {
+  const db = await getDb();
+  return db.collection(process.env.MONGODB_SESSIONS_COLLECTION || 'sessions');
+}
+
 async function getReceiptsBucket() {
   const db = await getDb();
   return new GridFSBucket(db, {
@@ -71,8 +81,10 @@ function resetMongoCacheIfClosed(error) {
 }
 
 module.exports = {
+  getMembersCollection,
   getProjectsCollection,
   getReceiptsBucket,
+  getSessionsCollection,
   resetMongoCacheIfClosed,
   toObjectId,
 };

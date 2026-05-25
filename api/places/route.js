@@ -1,4 +1,5 @@
 const { sendJson } = require('../_lib/http');
+const { requireAuth } = require('../_lib/auth');
 
 const cache = new Map();
 const cacheTtlMs = 60 * 60 * 1000;
@@ -29,6 +30,9 @@ function setCache(key, value) {
 
 module.exports = async function handler(req, res) {
   try {
+    const member = await requireAuth(req, res);
+    if (!member) return;
+
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET');
       sendJson(res, 405, { error: 'Method not allowed.' });

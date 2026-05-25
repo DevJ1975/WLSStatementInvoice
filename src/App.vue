@@ -4,7 +4,6 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
 const entryDefaultsStorageKey = 'wls-entry-defaults-v1';
-const pinHashStorageKey = 'wls-app-pin-hash-v1';
 const deviceDraftPrefix = 'device-draft-';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
 const tabs = [
@@ -16,6 +15,7 @@ const tabs = [
   ['worklog', 'Work Log'],
   ['print', 'Print View'],
   ['quickbooks', 'QuickBooks'],
+  ['admin', 'Admin'],
 ];
 const logoUrl = '/wls-logo.jpg';
 
@@ -124,10 +124,33 @@ const state = reactive({
   entryDefaults: blankEntryDefaults(),
   auth: {
     checked: false,
-    unlocked: false,
-    hasPin: false,
+    authenticated: false,
+    member: null,
+    setupRequired: false,
+    accountNumber: '',
     pinInput: '',
-    pinError: '',
+    loginError: '',
+    loginLoading: false,
+    setup: {
+      name: '',
+      email: '',
+      phone: '',
+      accountNumber: '',
+      pin: '',
+    },
+  },
+  admin: {
+    loading: false,
+    members: [],
+    status: '',
+    error: '',
+    form: {
+      name: '',
+      email: '',
+      phone: '',
+      role: 'member',
+      pin: '',
+    },
   },
   gps: {
     active: false,
@@ -291,6 +314,11 @@ const weatherText = computed(() => {
   return `${Math.round(state.header.weather.temperature)}°F ${state.header.weather.condition}`;
 });
 const reportAddressLines = computed(() => formatPostalAddressLines(report.value.address));
+const isAdmin = computed(() => state.auth.member?.role === 'admin');
+const visibleTabs = computed(() => tabs.filter(([key]) => key !== 'admin' || isAdmin.value));
+const membersById = computed(() => new Map(state.admin.members.map((member) => [member.id, member])));
+const currentProjectMember = computed(() => membersById.value.get(state.currentProject?.memberId) || null);
+const accountFieldReadonly = computed(() => state.auth.member?.role === 'member' || Boolean(currentProjectMember.value));
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -458,10 +486,31 @@ function normalizeProject(project) {
     ...fallback,
     ...project,
     id: project?.id || project?._id || fallback.id,
+    siteId: project?.siteId || 'default',
+    memberId: project?.memberId || '',
+    createdBy: project?.createdBy || '',
+    updatedBy: project?.updatedBy || '',
     title: project?.title || fallback.title,
     status: project?.status || 'active',
     data: normalizeProjectData(project?.data),
   };
+}
+
+function applyAccountToProject(project = state.currentProject) {
+  if (!project?.data?.report || !state.auth.member) return project;
+  const owner = project.memberId ? membersById.value.get(project.memberId) : null;
+  const member = state.auth.member.role === 'member' ? state.auth.member : owner;
+  if (!member) return project;
+  project.data.report.employeeId = member.accountNumber || project.data.report.employeeId;
+  project.data.report.employeeName ||= member.name || '';
+  project.data.report.phone ||= member.phone || '';
+  project.data.report.email ||= member.email || '';
+  return project;
+}
+
+function memberName(memberId) {
+  const member = membersById.value.get(memberId);
+  return member ? `${member.name || 'Member'} #${member.accountNumber}` : 'Unassigned';
 }
 
 function isDeviceDraft(project) {
@@ -979,6 +1028,7 @@ function saveLocalArchive(options = {}) {
 
 async function apiJson(path, options = {}) {
   const response = await fetch(path, {
+    credentials: 'include',
     headers: {
       Accept: 'application/json',
       ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
@@ -1002,24 +1052,24 @@ async function loadProjects() {
   try {
     const payload = await apiJson('/api/projects');
     const cloudProjects = payload.projects.map(normalizeProject);
-    const deviceDrafts = findDeviceDrafts(localArchive.projects, cloudProjects);
 
-    state.projects = uniqueProjects([...cloudProjects, ...deviceDrafts]).map(normalizeProject);
+    state.projects = cloudProjects.map(normalizeProject);
     state.storage = 'mongodb';
 
-    if (deviceDrafts.length) {
-      state.error = `${deviceDrafts.length} device draft${deviceDrafts.length === 1 ? '' : 's'} found. Sync device drafts to cloud before switching devices.`;
-      state.recoveryStatus = 'Device drafts are available on this device. Use the green sync button to upload them.';
-    }
-
-    if (!cloudProjects.length && !deviceDrafts.length) {
+    if (!cloudProjects.length) {
       await createProject('Untitled expense project');
-    } else if (deviceDrafts.some((project) => project.originalProjectId === localArchive.currentProjectId || project.id === localArchive.currentProjectId)) {
-      await openProject(deviceDrafts.find((project) => project.originalProjectId === localArchive.currentProjectId || project.id === localArchive.currentProjectId).id);
     } else {
-      await openProject(cloudProjects[0]?.id || state.projects[0].id);
+      const preferred = cloudProjects.find((project) => project.id === localArchive.currentProjectId) || cloudProjects[0];
+      await openProject(preferred.id);
     }
-  } catch {
+  } catch (error) {
+    if (/sign in/i.test(error.message)) {
+      state.auth.authenticated = false;
+      state.auth.member = null;
+      state.auth.loginError = 'Please sign in again.';
+      state.loading = false;
+      return;
+    }
     state.projects = localArchive.projects.length ? localArchive.projects : [blankProject()];
     state.currentProject = state.projects.find((project) => project.id === localArchive.currentProjectId) || state.projects[0];
     refreshReceiptQueue();
@@ -1057,7 +1107,7 @@ async function createProject(title = 'Untitled expense project') {
       method: 'POST',
       body: JSON.stringify({ title }),
     });
-    const project = applyProjectDefaults(payload.project);
+    const project = applyAccountToProject(applyProjectDefaults(payload.project));
     state.projects = [project, ...state.projects];
     state.currentProject = project;
     seedMileageForm();
@@ -1079,7 +1129,7 @@ async function openProject(id) {
   stopGpsTripWatcher();
   if (state.storage === 'mongodb' && !isDeviceDraft({ id })) {
     const payload = await apiJson(`/api/projects/${id}`);
-    state.currentProject = normalizeProject(payload.project);
+    state.currentProject = applyAccountToProject(normalizeProject(payload.project));
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
     if (index >= 0) state.projects[index] = { ...state.projects[index], ...state.currentProject };
     refreshReceiptQueue();
@@ -1090,6 +1140,7 @@ async function openProject(id) {
   }
 
   state.currentProject = state.projects.find((project) => project.id === id) || state.projects[0];
+  applyAccountToProject();
   refreshReceiptQueue();
   seedMileageForm();
   seedWorkLogForm();
@@ -1123,6 +1174,7 @@ async function saveCurrentProject(options = {}) {
   }
 
   state.currentProject.title = projectTitle();
+  applyAccountToProject();
   state.currentProject.updatedAt = new Date().toISOString();
   const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
   if (index >= 0) state.projects[index] = state.currentProject;
@@ -1557,6 +1609,72 @@ function calculatorEquals() {
   calculator.storedValue = null;
   calculator.operator = '';
   calculator.waitingForOperand = true;
+}
+
+async function loadMembers() {
+  if (!isAdmin.value) return;
+  state.admin.loading = true;
+  state.admin.error = '';
+  try {
+    const payload = await apiJson('/api/members');
+    state.admin.members = payload.members || [];
+  } catch (error) {
+    state.admin.error = error.message;
+  } finally {
+    state.admin.loading = false;
+  }
+}
+
+function resetMemberForm() {
+  Object.assign(state.admin.form, { name: '', email: '', phone: '', role: 'member', pin: '' });
+}
+
+async function createMember() {
+  state.admin.error = '';
+  state.admin.status = '';
+  try {
+    const payload = await apiJson('/api/members', {
+      method: 'POST',
+      body: JSON.stringify(state.admin.form),
+    });
+    state.admin.members = [...state.admin.members, payload.member].sort((a, b) => a.accountNumber.localeCompare(b.accountNumber));
+    state.admin.status = `Created ${payload.member.name || 'member'} with account #${payload.member.accountNumber}.`;
+    resetMemberForm();
+  } catch (error) {
+    state.admin.error = error.message;
+  }
+}
+
+async function patchMember(member, patch) {
+  state.admin.error = '';
+  state.admin.status = '';
+  try {
+    const payload = await apiJson(`/api/members/${member.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    const index = state.admin.members.findIndex((item) => item.id === member.id);
+    if (index >= 0) state.admin.members[index] = payload.member;
+    state.admin.status = 'Member updated.';
+  } catch (error) {
+    state.admin.error = error.message;
+  }
+}
+
+async function resetMemberPin(member) {
+  const pin = window.prompt(`New PIN for ${member.name || member.accountNumber}`);
+  if (!pin) return;
+  await patchMember(member, { pin });
+}
+
+async function toggleMemberStatus(member) {
+  await patchMember(member, { status: member.status === 'active' ? 'disabled' : 'active' });
+}
+
+async function assignProjectMember(project, memberId) {
+  if (!isAdmin.value || !project) return;
+  await patchProject(project, { memberId });
+  if (state.currentProject?.id === project.id) applyAccountToProject(state.currentProject);
 }
 
 async function patchProject(project, patch) {
@@ -2631,63 +2749,84 @@ async function reverseGeocodeHeaderLocation(latitude, longitude) {
   return city || region || result.countryName || 'Current location';
 }
 
-async function hashPin(pin) {
-  const bytes = new TextEncoder().encode(`wls-pin:${pin}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
 async function initializeSecurity() {
   state.entryDefaults = loadEntryDefaults();
-  state.auth.hasPin = Boolean(localStorage.getItem(pinHashStorageKey));
-  state.auth.unlocked = !state.auth.hasPin;
-  state.auth.checked = true;
-  if (state.auth.unlocked) {
-    startHeaderWeather();
-    await loadProjects();
-  } else {
+  try {
+    const payload = await apiJson('/api/auth/me');
+    state.auth.setupRequired = Boolean(payload.setupRequired);
+    state.auth.member = payload.member || null;
+    state.auth.authenticated = Boolean(payload.authenticated && payload.member);
+    state.auth.checked = true;
+    if (state.auth.authenticated) {
+      if (state.auth.member.role === 'admin') await loadMembers();
+      startHeaderWeather();
+      await loadProjects();
+    } else {
+      state.loading = false;
+    }
+  } catch (error) {
+    state.auth.checked = true;
+    state.auth.authenticated = false;
+    state.auth.loginError = error.message || 'Sign in is unavailable.';
     state.loading = false;
   }
 }
 
-async function unlockWithPin() {
-  state.auth.pinError = '';
-  const storedHash = localStorage.getItem(pinHashStorageKey);
-  if (!storedHash) {
-    state.auth.unlocked = true;
+async function loginWithAccount() {
+  state.auth.loginError = '';
+  state.auth.loginLoading = true;
+  try {
+    const payload = await apiJson('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountNumber: state.auth.accountNumber,
+        pin: state.auth.pinInput,
+      }),
+    });
+    state.auth.member = payload.member;
+    state.auth.authenticated = true;
+    state.auth.setupRequired = false;
+    state.auth.pinInput = '';
+    if (state.auth.member.role === 'admin') await loadMembers();
     startHeaderWeather();
     await loadProjects();
-    return;
+  } catch (error) {
+    state.auth.loginError = error.message;
+  } finally {
+    state.auth.loginLoading = false;
   }
-  if ((await hashPin(state.auth.pinInput)) !== storedHash) {
-    state.auth.pinError = 'Incorrect PIN.';
-    return;
-  }
-  state.auth.pinInput = '';
-  state.auth.unlocked = true;
-  startHeaderWeather();
-  await loadProjects();
 }
 
-async function setAppPin() {
-  const pin = window.prompt('Set a 4+ digit app PIN for this device');
-  if (!pin) return;
-  if (pin.trim().length < 4) {
-    state.error = 'PIN must be at least 4 digits.';
-    return;
+async function setupFirstAdmin() {
+  state.auth.loginError = '';
+  state.auth.loginLoading = true;
+  try {
+    const payload = await apiJson('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify(state.auth.setup),
+    });
+    state.auth.member = payload.member;
+    state.auth.authenticated = true;
+    state.auth.setupRequired = false;
+    state.auth.setup.pin = '';
+    await loadMembers();
+    startHeaderWeather();
+    await loadProjects();
+  } catch (error) {
+    state.auth.loginError = error.message;
+  } finally {
+    state.auth.loginLoading = false;
   }
-  localStorage.setItem(pinHashStorageKey, await hashPin(pin.trim()));
-  state.auth.hasPin = true;
-  state.auth.unlocked = true;
-  state.error = 'App PIN is set on this device.';
 }
 
-function clearAppPin() {
-  if (!window.confirm('Remove the app PIN on this device?')) return;
-  localStorage.removeItem(pinHashStorageKey);
-  state.auth.hasPin = false;
-  state.auth.unlocked = true;
-  state.error = 'App PIN removed on this device.';
+async function logoutAccount() {
+  await apiJson('/api/auth/logout', { method: 'POST' }).catch(() => null);
+  state.auth.authenticated = false;
+  state.auth.member = null;
+  state.projects = [];
+  state.currentProject = null;
+  state.tab = 'dashboard';
+  state.loading = false;
 }
 
 function receiptCompressionText() {
@@ -2756,6 +2895,7 @@ async function saveReceiptDraft() {
       );
       const response = await fetch(`/api/projects/${state.currentProject.id}/receipts`, {
         method: 'POST',
+        credentials: 'include',
         body: formData,
       });
       const payload = await response.json();
@@ -2788,7 +2928,7 @@ function blobToDataUrl(blob) {
 }
 
 async function imageToDataUrl(path) {
-  const response = await fetch(path);
+  const response = await fetch(path, { credentials: 'include' });
   const blob = await response.blob();
   return blobToDataUrl(blob);
 }
@@ -3579,13 +3719,25 @@ onBeforeUnmount(() => {
       </form>
     </section>
 
-    <section v-else-if="!state.auth.unlocked" class="pin-gate">
-      <form @submit.prevent="unlockWithPin">
+    <section v-else-if="!state.auth.authenticated" class="pin-gate">
+      <form v-if="state.auth.setupRequired" @submit.prevent="setupFirstAdmin">
         <img :src="logoUrl" alt="Workplace Learning System" />
-        <h2>Enter app PIN</h2>
+        <h2>Create admin account</h2>
+        <input v-model="state.auth.setup.name" autocomplete="name" placeholder="Admin name" />
+        <input v-model="state.auth.setup.email" type="email" autocomplete="email" placeholder="Email" spellcheck="false" />
+        <input v-model="state.auth.setup.phone" autocomplete="tel" placeholder="Phone" spellcheck="false" />
+        <input v-model="state.auth.setup.accountNumber" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="Optional account #" spellcheck="false" />
+        <input v-model="state.auth.setup.pin" inputmode="numeric" type="password" autocomplete="new-password" placeholder="PIN" spellcheck="false" />
+        <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
+        <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Creating...' : 'Create admin' }}</button>
+      </form>
+      <form v-else @submit.prevent="loginWithAccount">
+        <img :src="logoUrl" alt="Workplace Learning System" />
+        <h2>Account login</h2>
+        <input v-model="state.auth.accountNumber" inputmode="numeric" maxlength="4" autocomplete="username" placeholder="Account #" spellcheck="false" />
         <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="PIN" spellcheck="false" />
-        <p v-if="state.auth.pinError" class="status-message gps-message">{{ state.auth.pinError }}</p>
-        <button type="submit">Unlock</button>
+        <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
+        <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Signing in...' : 'Sign in' }}</button>
       </form>
     </section>
 
@@ -3621,8 +3773,8 @@ onBeforeUnmount(() => {
             <i></i><i></i><i></i><i></i>
           </span>
         </button>
-        <button class="secondary" type="button" @click="setAppPin">{{ state.auth.hasPin ? 'Change PIN' : 'Set PIN' }}</button>
-        <button v-if="state.auth.hasPin" class="secondary" type="button" @click="clearAppPin">Remove PIN</button>
+        <span class="mode-pill">#{{ state.auth.member?.accountNumber }} {{ state.auth.member?.role }}</span>
+        <button class="secondary" type="button" @click="logoutAccount">Logout</button>
         <button class="secondary" type="button" @click="openPrintView">Print View</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
         <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
@@ -3667,7 +3819,7 @@ onBeforeUnmount(() => {
 
     <nav class="tabs" aria-label="Main views">
       <button
-        v-for="[key, label] in tabs"
+        v-for="[key, label] in visibleTabs"
         :key="key"
         :class="{ active: state.tab === key }"
         type="button"
@@ -3910,13 +4062,50 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
+    <section v-else-if="isAdmin && state.tab === 'admin'" class="admin-view">
+      <div class="admin-grid">
+        <form class="admin-panel" @submit.prevent="createMember">
+          <h2>Create member</h2>
+          <input v-model="state.admin.form.name" required placeholder="Member name" />
+          <input v-model="state.admin.form.email" type="email" placeholder="Email" spellcheck="false" />
+          <input v-model="state.admin.form.phone" placeholder="Phone" spellcheck="false" />
+          <select v-model="state.admin.form.role">
+            <option value="member">Member</option>
+            <option value="admin">Admin</option>
+          </select>
+          <input v-model="state.admin.form.pin" required inputmode="numeric" type="password" minlength="4" placeholder="Temporary PIN" spellcheck="false" />
+          <button type="submit">Create account</button>
+        </form>
+
+        <section class="admin-panel">
+          <div class="sheet-title-row">
+            <span>Members</span>
+            <button class="secondary" type="button" @click="loadMembers">Refresh</button>
+          </div>
+          <p v-if="state.admin.status" class="sync-status">{{ state.admin.status }}</p>
+          <p v-if="state.admin.error" class="status-message">{{ state.admin.error }}</p>
+          <div class="member-list">
+            <article v-for="member in state.admin.members" :key="member.id" :class="{ disabled: member.status === 'disabled' }">
+              <div>
+                <h3>{{ member.name || 'Member' }}</h3>
+                <p>#{{ member.accountNumber }} | {{ member.role }} | {{ member.status }}</p>
+                <p>{{ [member.email, member.phone].filter(Boolean).join(' | ') }}</p>
+              </div>
+              <select :value="member.role" @change="patchMember(member, { role: $event.target.value })">
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button class="secondary" type="button" @click="resetMemberPin(member)">Reset PIN</button>
+              <button class="secondary" type="button" @click="toggleMemberStatus(member)">{{ member.status === 'active' ? 'Disable' : 'Reactivate' }}</button>
+            </article>
+          </div>
+        </section>
+      </div>
+    </section>
+
     <section v-else-if="state.tab === 'archive'" class="archive-view">
       <div class="archive-toolbar">
         <h2>Project archive</h2>
-        <button v-if="state.storage === 'mongodb' && localProjectCount" class="sync-cloud-button" type="button" :disabled="state.syncingLocal" @click="syncLocalProjectsToCloud">
-          {{ state.syncingLocal ? 'Syncing device drafts...' : `Sync ${localProjectCount} device draft${localProjectCount === 1 ? '' : 's'} to cloud` }}
-        </button>
-        <button v-if="state.storage === 'mongodb'" class="secondary" type="button" @click="recheckDeviceDrafts">Recheck device storage</button>
         <button class="secondary" type="button" @click="exportJsonBackup">Export JSON Backup</button>
         <button class="secondary" type="button" @click="openBackupImport">Import Backup</button>
         <input ref="backupFileInput" class="hidden-file" type="file" accept="application/json" @change="importJsonBackup" />
@@ -3928,7 +4117,14 @@ onBeforeUnmount(() => {
           <div>
             <h3>{{ projectTitle(project) }}</h3>
             <p>{{ project.status }} <span v-if="project.periodFrom">| {{ project.periodFrom }} to {{ project.periodTo }}</span></p>
+            <p v-if="isAdmin">Assigned: {{ memberName(project.memberId) }}</p>
           </div>
+          <select v-if="isAdmin" :value="project.memberId || ''" @change="assignProjectMember(project, $event.target.value)">
+            <option value="">Unassigned</option>
+            <option v-for="member in state.admin.members.filter((item) => item.status === 'active')" :key="member.id" :value="member.id">
+              #{{ member.accountNumber }} {{ member.name || 'Member' }}
+            </option>
+          </select>
           <button class="secondary" type="button" @click="openProject(project.id)">Open</button>
           <button class="secondary" type="button" @click="renameProject(project)">Rename</button>
           <button v-if="project.status !== 'archived'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
@@ -3956,7 +4152,7 @@ onBeforeUnmount(() => {
         <input v-model="report.employeeName" placeholder="Employee name" />
         <input v-model="report.address" placeholder="Address" />
         <div class="inline-fields">
-          <input v-model="report.employeeId" placeholder="Employee ID" spellcheck="false" />
+          <input v-model="report.employeeId" placeholder="Account #" spellcheck="false" :readonly="accountFieldReadonly" />
           <input v-model="report.reportNo" placeholder="Report no." spellcheck="false" />
         </div>
         <div class="inline-fields">
@@ -4020,7 +4216,7 @@ onBeforeUnmount(() => {
             <dt>CLIENT</dt><dd>{{ meta.clientName }}</dd>
             <dt>JOB / PO</dt><dd>{{ [meta.jobNumber, meta.poNumber].filter(Boolean).join(' / ') }}</dd>
             <dt>DATE</dt><dd>{{ report.reportDate }}</dd>
-            <dt>EMPLOYEE ID</dt><dd>{{ report.employeeId }}</dd>
+            <dt>ACCOUNT #</dt><dd>{{ report.employeeId }}</dd>
             <dt>PERIOD</dt><dd>{{ formatPeriod() }}</dd>
           </dl>
         </div>

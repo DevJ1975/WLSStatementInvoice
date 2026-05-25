@@ -1,5 +1,6 @@
 const { getProjectsCollection, getReceiptsBucket, resetMongoCacheIfClosed, toObjectId } = require('../../../../_lib/mongo');
 const { sendJson } = require('../../../../_lib/http');
+const { projectAccessFilter, requireAuth } = require('../../../../_lib/project-auth');
 
 function routeParam(req, key) {
   const value = req.query?.[key];
@@ -8,6 +9,9 @@ function routeParam(req, key) {
 
 module.exports = async function handler(req, res) {
   try {
+    const member = await requireAuth(req, res);
+    if (!member) return;
+
     if (req.method !== 'GET') {
       res.setHeader('Allow', 'GET');
       sendJson(res, 405, { error: 'Method not allowed.' });
@@ -23,7 +27,7 @@ module.exports = async function handler(req, res) {
     }
 
     const collection = await getProjectsCollection();
-    const project = await collection.findOne({ _id });
+    const project = await collection.findOne(projectAccessFilter(member, _id));
     const receipt = project?.data?.receipts?.find((item) => item.id === receiptId);
     const fileId = toObjectId(receipt?.imageFileId);
     if (!receipt || !fileId) {
