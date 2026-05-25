@@ -35,6 +35,7 @@ const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
 const autosaveDelayMs = 900;
 const localArchiveDelayMs = 500;
+const footerBrandText = 'Powered by Trainovate Technologies LLC Copyright 2026';
 
 const state = reactive({
   loading: true,
@@ -2271,7 +2272,8 @@ function addPdfFooters(doc) {
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
     const footerLineY = pageHeight - 42;
-    const footerTextY = pageHeight - 24;
+    const footerTextY = pageHeight - 26;
+    const footerBrandY = pageHeight - 12;
 
     doc.setDrawColor(216, 224, 228);
     doc.line(pdfMargin, footerLineY, pageWidth - pdfMargin, footerLineY);
@@ -2281,6 +2283,8 @@ function addPdfFooters(doc) {
     doc.text(`Invoice: ${invoiceNumber}`, pdfMargin, footerTextY);
     doc.text(footerTitle, pageWidth / 2, footerTextY, { align: 'center' });
     doc.text(`Date: ${date}`, pageWidth - pdfMargin, footerTextY, { align: 'right' });
+    doc.setFontSize(7);
+    doc.text(footerBrandText, pageWidth / 2, footerBrandY, { align: 'center' });
   }
 }
 
@@ -2502,6 +2506,7 @@ onBeforeUnmount(() => {
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
             <span>Title: {{ projectTitle() }}</span>
             <span>Date: {{ reportPrintDate() }}</span>
+            <span class="footer-brand">{{ footerBrandText }}</span>
           </footer>
         </article>
 
@@ -2542,6 +2547,7 @@ onBeforeUnmount(() => {
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
             <span>Title: {{ projectTitle() }}</span>
             <span>Date: {{ reportPrintDate() }}</span>
+            <span class="footer-brand">{{ footerBrandText }}</span>
           </footer>
         </article>
 
@@ -2572,6 +2578,7 @@ onBeforeUnmount(() => {
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
             <span>Title: {{ projectTitle() }}</span>
             <span>Date: {{ reportPrintDate() }}</span>
+            <span class="footer-brand">{{ footerBrandText }}</span>
           </footer>
         </article>
 
@@ -2597,6 +2604,7 @@ onBeforeUnmount(() => {
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
             <span>Title: {{ projectTitle() }}</span>
             <span>Date: {{ reportPrintDate() }}</span>
+            <span class="footer-brand">{{ footerBrandText }}</span>
           </footer>
         </article>
       </div>

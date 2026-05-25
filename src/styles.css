@@ -568,6 +568,14 @@ h3 {
   text-align: right;
 }
 
+.print-footer .footer-brand {
+  grid-column: 1 / -1;
+  color: #65747a;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
 .quickbooks-panel {
   display: grid;
   gap: 16px;
@@ -1226,7 +1234,8 @@ h3 {
 
   .print-footer span,
   .print-footer span:nth-child(2),
-  .print-footer span:last-child {
+  .print-footer span:last-child,
+  .print-footer .footer-brand {
     text-align: left;
   }
 
