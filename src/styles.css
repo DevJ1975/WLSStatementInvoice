@@ -838,6 +838,62 @@ h3 {
   min-width: 0;
 }
 
+.print-receipt-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.print-receipt-card {
+  display: grid;
+  grid-template-rows: auto minmax(220px, 1fr);
+  overflow: hidden;
+  border: 1px solid #c8d1d6;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.print-receipt-details {
+  border-bottom: 1px solid #d8e0e4;
+  padding: 12px 14px;
+}
+
+.print-receipt-details h3,
+.print-receipt-details p {
+  margin: 0;
+}
+
+.print-receipt-details h3 {
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+
+.print-receipt-details p {
+  color: #4b5a60;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.print-receipt-image {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  margin: 12px;
+  border: 1px solid #d8e0e4;
+  border-radius: 7px;
+  background: white;
+  color: #627078;
+  font-weight: 800;
+}
+
+.print-receipt-image img {
+  width: 100%;
+  height: 100%;
+  max-height: 300px;
+  object-fit: contain;
+}
+
 .print-meta {
   margin-bottom: 0;
 }
@@ -1843,6 +1899,38 @@ h3 {
   .print-page .sheet-table th,
   .print-page .sheet-table td {
     padding: 5px 6px;
+  }
+
+  .print-receipt-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.16in;
+  }
+
+  .print-receipt-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    grid-template-rows: auto 2.05in;
+  }
+
+  .print-receipt-details {
+    padding: 0.08in 0.1in;
+  }
+
+  .print-receipt-details h3 {
+    font-size: 12px;
+  }
+
+  .print-receipt-details p {
+    font-size: 9px;
+  }
+
+  .print-receipt-image {
+    min-height: 2.05in;
+    margin: 0.08in;
+  }
+
+  .print-receipt-image img {
+    max-height: 2.05in;
   }
 
   .print-footer {

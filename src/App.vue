@@ -319,6 +319,7 @@ const visibleTabs = computed(() => tabs.filter(([key]) => key !== 'admin' || isA
 const membersById = computed(() => new Map(state.admin.members.map((member) => [member.id, member])));
 const currentProjectMember = computed(() => membersById.value.get(state.currentProject?.memberId) || null);
 const accountFieldReadonly = computed(() => state.auth.member?.role === 'member' || Boolean(currentProjectMember.value));
+const printReceiptPages = computed(() => chunkList(data.value.receipts, 4));
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -511,6 +512,14 @@ function applyAccountToProject(project = state.currentProject) {
 function memberName(memberId) {
   const member = membersById.value.get(memberId);
   return member ? `${member.name || 'Member'} #${member.accountNumber}` : 'Unassigned';
+}
+
+function chunkList(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function isDeviceDraft(project) {
@@ -3885,6 +3894,7 @@ onBeforeUnmount(() => {
         <div>
           <button type="button" @click="printPackage">Print Package</button>
           <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
+          <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
         </div>
       </div>
 
@@ -4025,6 +4035,37 @@ onBeforeUnmount(() => {
                 </tr>
               </tbody>
             </table>
+          </div>
+          <footer class="print-footer">
+            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
+            <span>Title: {{ projectTitle() }}</span>
+            <span>Date: {{ reportPrintDate() }}</span>
+            <span class="footer-brand">{{ footerBrandText }}</span>
+          </footer>
+        </article>
+
+        <article v-for="(receiptPage, pageIndex) in printReceiptPages" :key="`print-receipts-${pageIndex}`" class="print-page receipt-print-page">
+          <header class="print-page-header">
+            <img :src="logoUrl" alt="Workplace Learning System" />
+            <div>
+              <h2>Receipt Appendix</h2>
+              <p>Page {{ pageIndex + 1 }} of {{ printReceiptPages.length }}</p>
+            </div>
+          </header>
+          <div class="print-receipt-grid">
+            <article v-for="receipt in receiptPage" :key="`print-receipt-${receipt.id}`" class="print-receipt-card">
+              <div class="print-receipt-details">
+                <h3>{{ receipt.vendor || 'Receipt' }}</h3>
+                <p>Expense row: {{ receiptExpenseReference(receipt) }}</p>
+                <p>Date: {{ receipt.date || 'Not set' }} | Category: {{ receipt.category || 'Misc.' }}</p>
+                <p>Amount: {{ money.format(Number(receipt.amount || 0)) }}</p>
+                <p>Description: {{ receiptDescription(receipt) }}</p>
+              </div>
+              <div class="print-receipt-image">
+                <img v-if="receiptImageUrl(receipt)" :src="receiptImageUrl(receipt)" :alt="receipt.vendor || 'Receipt image'" />
+                <span v-else>Receipt image unavailable</span>
+              </div>
+            </article>
           </div>
           <footer class="print-footer">
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
