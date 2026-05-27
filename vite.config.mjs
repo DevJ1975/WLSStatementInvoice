@@ -30,8 +30,16 @@ export default defineConfig({
           if (id.includes('vite/preload-helper')) return 'vendor-runtime';
           if (id.includes('node_modules/vue')) return 'vendor-vue';
           if (id.includes('node_modules/jspdf') || id.includes('node_modules/dompurify') || id.includes('node_modules/html2canvas')) return 'vendor-pdf';
-          if (id.includes('node_modules/exceljs')) return 'vendor-excel';
-          if (id.includes('node_modules/tesseract.js')) return 'vendor-ocr';
+          if (
+            id.includes('node_modules/exceljs') ||
+            id.includes('node_modules/jszip') ||
+            id.includes('node_modules/fast-csv') ||
+            id.includes('node_modules/readable-stream') ||
+            id.includes('node_modules/archiver') ||
+            id.includes('node_modules/saxes') ||
+            id.includes('node_modules/dayjs')
+          ) return 'vendor-excel';
+          if (id.includes('node_modules/tesseract.js') || id.includes('node_modules/tesseract-core') || id.includes('node_modules/worker-loader')) return 'vendor-ocr';
           if (id.includes('node_modules/leaflet')) return 'vendor-maps';
           return undefined;
         },

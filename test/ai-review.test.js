@@ -105,6 +105,39 @@ test('deterministic preflight warns for draft work logs and date issues', () => 
   assert.ok(review.warnings.some((item) => item.label.includes('outside')));
 });
 
+test('deterministic preflight warns for receipt metadata mismatches', () => {
+  const project = completeProject({
+    receipts: [
+      {
+        id: 'receipt-1',
+        expenseId: 'expense-1',
+        vendor: 'Different Vendor',
+        date: '2026-05-19',
+        amount: 15,
+        category: 'Supplies',
+        imageFileId: 'file-1',
+      },
+    ],
+  });
+  const review = deterministicPreflight(project);
+  const labels = review.warnings.map((item) => item.label).join('\n');
+
+  assert.match(labels, /Expense row 1 amount does not match/);
+  assert.match(labels, /Expense row 1 date does not match/);
+  assert.match(labels, /Expense row 1 vendor does not match/);
+  assert.match(labels, /Expense row 1 category does not match/);
+});
+
+test('deterministic preflight flags onsite work logs without same-day mileage', () => {
+  const project = completeProject({
+    mileageRows: [],
+    workLogs: [{ id: 'work-1', date: '2026-05-18', taskCategory: 'Onsite work', hours: 8, status: 'Complete' }],
+  });
+  const review = deterministicPreflight(project);
+
+  assert.ok(review.warnings.some((item) => item.label.includes('Work log row 1 has onsite/travel work but no mileage row')));
+});
+
 test('deterministic preflight calculates package totals', () => {
   const review = deterministicPreflight(completeProject());
 
@@ -135,6 +168,23 @@ test('compact AI payload redacts receipt images and limits OCR text', () => {
   assert.equal(payload.receipts[0].ocrText.length, 700);
 });
 
+test('compact AI payload includes business rules, receipt matching, work-log coverage, and save state', () => {
+  const payload = compactProjectForAi(
+    completeProject(),
+    { saveState: { storage: 'local', hasUnsavedChanges: true, status: 'cached' } }
+  );
+
+  assert.ok(payload.businessRules.some((rule) => rule.includes('Julie is advisory')));
+  assert.equal(payload.saveState.storage, 'local');
+  assert.equal(payload.saveState.hasUnsavedChanges, true);
+  assert.equal(payload.expenses[0].receiptReference, 'Receipt row 1');
+  assert.deepEqual(payload.expenses[0].receiptMatchStatus, ['matched']);
+  assert.equal(payload.expenses[0].hasReceiptImage, true);
+  assert.equal(payload.receipts[0].linkedExpenseRow, 1);
+  assert.deepEqual(payload.receipts[0].matchStatus, ['matched']);
+  assert.equal(payload.workLogs[0].hasMileageForDate, true);
+});
+
 test('Julie detects report-review chat intent', () => {
   assert.equal(isReportReviewIntent('Please check for errors'), true);
   assert.equal(isReportReviewIntent('review this report'), true);
@@ -148,10 +198,12 @@ test('Julie report-review chat prompt stays focused on report data, not code', (
 
   assert.equal(result.reportReviewIntent, true);
   assert.equal(result.prompt.mode, 'report-review');
-  assert.ok(result.prompt.responseFormat.includes('Critical'));
+  assert.ok(result.prompt.responseFormat.includes('Needs attention'));
+  assert.ok(result.prompt.responseFormat.includes('Next 3 actions'));
   assert.ok(serialized.includes('deterministicReview'));
   assert.ok(serialized.includes('compactProject'));
   assert.ok(serialized.includes('Do not provide code'));
+  assert.ok(serialized.includes('Do not use Critical as a heading'));
   assert.ok(serialized.includes('Expense row'));
 });
 

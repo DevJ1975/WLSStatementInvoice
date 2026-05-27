@@ -1,5 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import CalculatorOverlay from './components/CalculatorOverlay.vue';
+import JulieChatDrawer from './components/JulieChatDrawer.vue';
 import { deleteRowWithUndo, replaceRowsWithUndo, restoreUndoItems, visibleProjectsForArchive } from './crudLogic.mjs';
 import { createRoundTripRows, reverseRouteGeometry, routeThumbnailPolyline, workLogDatesMissingMileage } from './mileageLogic.mjs';
 import {
@@ -110,6 +112,8 @@ const pdfLogoWidth = 132;
 const pdfLogoHeight = 56;
 const pdfHeaderLineY = 94;
 const pdfTableStartY = 114;
+const initialListLimit = 25;
+const initialReceiptLimit = 12;
 const autosaveDelayMs = 900;
 const localArchiveDelayMs = 500;
 const weatherRefreshMs = 15 * 60 * 1000;
@@ -129,9 +133,18 @@ const state = reactive({
   lastSavedAt: '',
   lastSaveStatus: 'Not saved yet',
   saveNotice: '',
+  hasUnsavedChanges: false,
   duplicateWarning: '',
   undo: null,
   archiveFilter: 'active',
+  listLimits: {
+    archive: initialListLimit,
+    expenses: initialListLimit,
+    mileage: initialListLimit,
+    workLogs: initialListLimit,
+    receipts: initialReceiptLimit,
+    members: initialListLimit,
+  },
   editing: {
     expenseId: '',
     mileageId: '',
@@ -272,6 +285,8 @@ const workLogForm = reactive({
 let gpsTimer = null;
 let autosaveTimer = null;
 let localArchiveTimer = null;
+let queuedSaveAfterCurrent = false;
+let queuedSaveNeedsVerification = false;
 const addressTimers = {};
 let routeMap = null;
 let routeLayer = null;
@@ -279,6 +294,7 @@ let leafletApi = null;
 let leafletLoader = null;
 let clockTimer = null;
 let weatherTimer = null;
+const receiptImageDataUrlCache = new Map();
 
 const data = computed(() => state.currentProject?.data || blankProjectData());
 const meta = computed(() => data.value.meta);
@@ -339,6 +355,7 @@ const dashboardStats = computed(() => {
 });
 const syncStatusText = computed(() => {
   if (state.saving) return 'Saving...';
+  if (state.hasUnsavedChanges) return state.lastSaveStatus || 'Unsaved changes';
   if (state.storage === 'mongodb') return state.lastSavedAt ? `Cloud saved ${formatDateTime(state.lastSavedAt)}` : 'Cloud sync active';
   return state.lastSavedAt ? `Saved on this device ${formatDateTime(state.lastSavedAt)}` : 'Local fallback';
 });
@@ -369,7 +386,7 @@ const aiReviewStatusText = computed(() => {
   if (state.ai.loading) return 'Julie is reviewing...';
   if (!review) return 'Not reviewed';
   const status = review.status || review.lastStatus;
-  if (status === 'fail') return 'Critical fixes needed';
+  if (status === 'fail') return 'Needs attention';
   if (status === 'warning') return 'Warnings to review';
   if (status === 'pass') return 'Julie reviewed';
   return 'Not reviewed';
@@ -394,6 +411,13 @@ const membersById = computed(() => new Map(state.admin.members.map((member) => [
 const currentProjectMember = computed(() => membersById.value.get(state.currentProject?.memberId) || null);
 const accountFieldReadonly = computed(() => state.auth.member?.role === 'member' || Boolean(currentProjectMember.value));
 const printReceiptPages = computed(() => chunkList(data.value.receipts, 4));
+const archiveProjects = computed(() => visibleProjectsForArchive(state.projects, state.archiveFilter));
+const visibleExpenseRows = computed(() => data.value.expenseRows.slice(0, state.listLimits.expenses));
+const visibleMileageRows = computed(() => data.value.mileageRows.slice(0, state.listLimits.mileage));
+const visibleWorkLogs = computed(() => data.value.workLogs.slice(0, state.listLimits.workLogs));
+const visibleReceipts = computed(() => data.value.receipts.slice(0, state.listLimits.receipts));
+const visibleArchiveProjects = computed(() => archiveProjects.value.slice(0, state.listLimits.archive));
+const visibleMembers = computed(() => state.admin.members.slice(0, state.listLimits.members));
 const compactExpenseRows = computed(() =>
   data.value.expenseRows.map((row, index) => ({
     ...row,
@@ -426,7 +450,6 @@ const workLogDateOutsideLaborRanges = computed(() => {
   );
 });
 const workLogTypeOptions = computed(() => [...new Set([...workLogTypes, ...state.entryDefaults.workCategories].filter(Boolean))]);
-const archiveProjects = computed(() => visibleProjectsForArchive(state.projects, state.archiveFilter));
 const generatedWorkLogSummary = computed(() =>
   autoWorkLogSummary({
     workType: workLogForm.taskCategory,
@@ -437,6 +460,40 @@ const generatedWorkLogSummary = computed(() =>
 );
 const savedMileageLocations = computed(() => state.preferences.mileageLocations);
 const selectedMileageDrafts = computed(() => state.mileageDrafts.filter((draft) => draft.selected));
+const saveHealthStatus = computed(() => {
+  if (state.saving) return 'Saving';
+  if (state.lastSaveStatus === 'Save failed - cached on this device') return 'Save failed';
+  if (state.hasUnsavedChanges) return state.lastSaveStatus || 'Unsaved changes';
+  if (state.storage === 'mongodb' && state.lastSavedAt) return 'MongoDB saved';
+  if (state.storage === 'mongodb') return 'MongoDB connected';
+  return state.lastSavedAt ? 'Cached locally' : 'Not saved';
+});
+const saveHealthDetail = computed(() => {
+  if (state.lastSaveStatus === 'Save failed - cached on this device') return 'Changes are cached on this device until MongoDB is reachable.';
+  if (state.hasUnsavedChanges) return 'Autosave will save these changes to MongoDB after editing settles.';
+  if (state.lastSavedAt) return formatDateTime(state.lastSavedAt);
+  return 'No confirmed save yet.';
+});
+const saveHealthClass = computed(() => ({
+  pending: state.hasUnsavedChanges || ['Autosave pending...', 'Autosaving...', 'Saving...', 'Save pending...'].includes(state.lastSaveStatus),
+  failed: state.lastSaveStatus === 'Save failed - cached on this device',
+  cloud: !state.hasUnsavedChanges && state.storage === 'mongodb' && Boolean(state.lastSavedAt),
+}));
+
+function tabBadge(key) {
+  const counts = {
+    archive: archiveProjects.value.length,
+    expenses: data.value.expenseRows.length + data.value.receipts.length,
+    mileage: data.value.mileageRows.length,
+    worklog: data.value.workLogs.length,
+    admin: state.admin.members.length,
+  };
+  return counts[key] || '';
+}
+
+function showMoreRows(listKey, total, increment = initialListLimit) {
+  state.listLimits[listKey] = Math.min(total, state.listLimits[listKey] + increment);
+}
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1344,27 +1401,36 @@ async function createProject(title = 'Untitled expense project') {
 }
 
 async function openProject(id) {
+  if (state.currentProject?.id && state.currentProject.id !== id && (autosaveTimer || state.hasUnsavedChanges)) {
+    clearAutosaveTimer();
+    await saveCurrentProject({ requireCloud: state.storage === 'mongodb', verifyCloud: state.storage === 'mongodb' });
+  }
+  if (state.currentProject?.id !== id) receiptImageDataUrlCache.clear();
   stopGpsTripWatcher();
   if (state.storage === 'mongodb' && !isDeviceDraft({ id })) {
     const payload = await apiJson(`/api/projects/${id}`);
     state.currentProject = applyAccountToProject(normalizeProject(payload.project));
+    state.hasUnsavedChanges = false;
+    state.lastSavedAt = state.currentProject.updatedAt || state.lastSavedAt;
+    state.lastSaveStatus = 'Cloud sync active';
     const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
     if (index >= 0) state.projects[index] = { ...state.projects[index], ...state.currentProject };
     refreshReceiptQueue();
     seedMileageForm();
     seedWorkLogForm();
     state.mileageDrafts = [];
-    saveLocalArchive();
+    saveLocalArchive({ updateStatus: false });
     return;
   }
 
   state.currentProject = state.projects.find((project) => project.id === id) || state.projects[0];
   applyAccountToProject();
+  state.hasUnsavedChanges = false;
   refreshReceiptQueue();
   seedMileageForm();
   seedWorkLogForm();
   state.mileageDrafts = [];
-  saveLocalArchive();
+  saveLocalArchive({ updateStatus: false });
 }
 
 function clearAutosaveTimer() {
@@ -1377,9 +1443,11 @@ function clearAutosaveTimer() {
 function scheduleAutoSave() {
   if (!state.currentProject || state.loading) return;
   clearAutosaveTimer();
+  state.hasUnsavedChanges = true;
   state.lastSaveStatus = 'Autosave pending...';
   state.saveNotice = '';
   state.ai.warningAcknowledged = false;
+  saveLocalArchive({ defer: true, updateStatus: false });
   autosaveTimer = setTimeout(() => {
     autosaveTimer = null;
     saveCurrentProject({ autosave: true });
@@ -1389,11 +1457,16 @@ function scheduleAutoSave() {
 async function saveCurrentProject(options = {}) {
   const config = options && typeof options === 'object' ? options : {};
   if (!state.currentProject) return;
-  if (config.autosave && state.saving) {
-    scheduleAutoSave();
+  if (state.saving) {
+    queuedSaveAfterCurrent = true;
+    queuedSaveNeedsVerification = queuedSaveNeedsVerification || Boolean(config.verifyCloud || config.requireCloud || !config.autosave);
+    state.hasUnsavedChanges = true;
+    state.lastSaveStatus = config.autosave ? 'Autosave pending...' : 'Save pending...';
     return;
   }
 
+  state.hasUnsavedChanges = true;
+  state.ai.warningAcknowledged = false;
   state.currentProject.title = projectTitle();
   applyAccountToProject();
   state.currentProject.updatedAt = new Date().toISOString();
@@ -1411,8 +1484,9 @@ async function saveCurrentProject(options = {}) {
     saveLocalArchive({ defer: Boolean(config.autosave) });
     if (config.requireCloud) {
       state.error = 'Saved on this device. Cloud save is unavailable right now.';
-      state.lastSaveStatus = 'Saved locally';
-      state.saveNotice = `Saved locally at ${formatDateTime(new Date())}`;
+      state.hasUnsavedChanges = true;
+      state.lastSaveStatus = 'Save failed - cached on this device';
+      state.saveNotice = 'Cloud save is unavailable. Changes are cached on this device.';
     } else if (config.autosave) {
       state.lastSaveStatus = 'Autosaved locally';
       state.saveNotice = `Autosaved locally at ${formatDateTime(new Date())}`;
@@ -1423,6 +1497,7 @@ async function saveCurrentProject(options = {}) {
   try {
     state.saving = true;
     if (config.autosave) state.lastSaveStatus = 'Autosaving...';
+    else state.lastSaveStatus = 'Saving...';
     const projectId = state.currentProject.id;
     const requestData = normalizeProjectData(state.currentProject.data);
     const expectedSignature = projectDataSignature({ id: projectId, data: requestData });
@@ -1437,31 +1512,47 @@ async function saveCurrentProject(options = {}) {
       throw new Error('MongoDB save was not confirmed by the server.');
     }
 
-    const successStatus = config.autosave ? 'Autosaved' : 'Saved successfully';
-    if (config.verifyCloud) {
-      const confirmed = await apiJson(`/api/projects/${projectId}`);
-      if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
-        throw new Error('MongoDB verification did not match the saved document.');
-      }
+    const confirmed = await apiJson(`/api/projects/${projectId}`);
+    if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
+      throw new Error('MongoDB verification did not match the saved document.');
     }
 
-    state.currentProject = normalizeProject(payload.project);
+    const currentSignature = projectDataSignature(state.currentProject);
+    const changedDuringSave = currentSignature !== expectedSignature;
+    if (changedDuringSave) {
+      queuedSaveAfterCurrent = true;
+      state.hasUnsavedChanges = true;
+      state.lastSaveStatus = 'Autosave pending...';
+    } else {
+      state.currentProject = normalizeProject(confirmed.project || payload.project);
+      state.hasUnsavedChanges = false;
+      state.lastSavedAt = new Date().toISOString();
+      const successStatus = config.autosave ? 'Autosaved to MongoDB' : 'Saved successfully';
+      state.lastSaveStatus = successStatus;
+      state.saveNotice = `${successStatus} at ${formatDateTime(state.lastSavedAt)}`;
+    }
     state.storage = 'mongodb';
     state.error = '';
+    const savedIndex = state.projects.findIndex((project) => project.id === state.currentProject.id);
+    if (savedIndex >= 0) state.projects[savedIndex] = state.currentProject;
     updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
-    state.lastSavedAt = new Date().toISOString();
-    state.lastSaveStatus = successStatus;
-    state.saveNotice = `${successStatus} at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
     if (!isPersistedMongoProject(state.currentProject)) state.storage = 'local';
+    state.hasUnsavedChanges = true;
     updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
     state.error = `Saved locally only. MongoDB save failed: ${error.message}`;
-    state.lastSaveStatus = 'MongoDB save failed';
+    state.lastSaveStatus = 'Save failed - cached on this device';
     state.saveNotice = 'MongoDB save failed. Changes are cached on this device.';
   } finally {
     state.saving = false;
+    if (queuedSaveAfterCurrent && state.currentProject) {
+      const verifyCloud = queuedSaveNeedsVerification;
+      queuedSaveAfterCurrent = false;
+      queuedSaveNeedsVerification = false;
+      await saveCurrentProject({ autosave: !verifyCloud, requireCloud: verifyCloud, verifyCloud });
+    }
   }
 }
 
@@ -1499,28 +1590,28 @@ async function saveDeviceDraftToMongo(config = {}) {
       throw new Error('Cloud save was not confirmed by the server.');
     }
 
-    if (config.verifyCloud) {
-      const confirmed = await apiJson(`/api/projects/${saved.project.id}`);
-      if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
-        throw new Error('Cloud verification did not match the saved document.');
-      }
+    const confirmed = await apiJson(`/api/projects/${saved.project.id}`);
+    if (confirmed.storage !== 'mongodb' || projectDataSignature(confirmed.project) !== expectedSignature) {
+      throw new Error('Cloud verification did not match the saved document.');
     }
 
-    const savedProject = normalizeProject(saved.project);
+    const savedProject = normalizeProject(confirmed.project || saved.project);
     state.projects = [savedProject, ...state.projects.filter((project) => project.id !== draft.id && project.id !== savedProject.id)];
     state.currentProject = savedProject;
     state.storage = 'mongodb';
     state.error = '';
+    state.hasUnsavedChanges = false;
     refreshReceiptQueue();
     updateEntryDefaultsFromProject();
     saveLocalArchive({ updateStatus: false });
     state.lastSavedAt = new Date().toISOString();
-    state.lastSaveStatus = 'Saved successfully';
-    state.saveNotice = `Saved successfully at ${formatDateTime(state.lastSavedAt)}`;
+    state.lastSaveStatus = config.autosave ? 'Autosaved to MongoDB' : 'Saved successfully';
+    state.saveNotice = `${state.lastSaveStatus} at ${formatDateTime(state.lastSavedAt)}`;
   } catch (error) {
+    state.hasUnsavedChanges = true;
     saveLocalArchive({ updateStatus: false });
     state.error = `Saved locally only. Cloud save failed: ${error.message}`;
-    state.lastSaveStatus = 'Cloud save failed';
+    state.lastSaveStatus = 'Save failed - cached on this device';
     state.saveNotice = 'Cloud save failed. Changes are cached on this device.';
   } finally {
     state.saving = false;
@@ -1548,7 +1639,7 @@ function openAiChat() {
   if (!state.ai.chatMessages.length) {
     state.ai.chatMessages.push({
       role: 'assistant',
-      content: "I'm Julie. Ask me to check this expense report for missing receipts, date issues, totals, mileage, work logs, or export readiness.",
+      content: "I'm Julie. Ask me to check this WLS report for missing receipts, date issues, totals, mileage, work logs, export readiness, and next actions. I will point to exact rows when I can.",
     });
   }
 }
@@ -3839,6 +3930,11 @@ async function setupFirstAdmin() {
 }
 
 async function logoutAccount() {
+  if (state.currentProject && (autosaveTimer || state.hasUnsavedChanges)) {
+    clearAutosaveTimer();
+    await saveCurrentProject({ requireCloud: state.storage === 'mongodb', verifyCloud: state.storage === 'mongodb' });
+  }
+  flushLocalArchive(false);
   await apiJson('/api/auth/logout', { method: 'POST' }).catch(() => null);
   state.auth.authenticated = false;
   state.auth.member = null;
@@ -3923,6 +4019,14 @@ async function saveReceiptDraft() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Receipt upload failed.');
       state.currentProject = normalizeProject(payload.project);
+      const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
+      if (index >= 0) state.projects[index] = state.currentProject;
+      state.hasUnsavedChanges = false;
+      state.storage = 'mongodb';
+      state.error = '';
+      state.lastSavedAt = new Date().toISOString();
+      state.lastSaveStatus = 'Saved successfully';
+      state.saveNotice = `Saved successfully at ${formatDateTime(state.lastSavedAt)}`;
       updateEntryDefaultsFromExpense(payload.expense, payload.receipt);
     } else {
       await addReceiptDraftLocally();
@@ -4340,9 +4444,13 @@ async function addReceiptAppendix(doc, logo) {
 }
 
 async function receiptImageForPdf(receipt) {
+  const cacheKey = receipt.imageDataUrl || receipt.imageFileId || receipt.id;
+  if (cacheKey && receiptImageDataUrlCache.has(cacheKey)) return receiptImageDataUrlCache.get(cacheKey);
   const source = receipt.imageDataUrl || (await imageToDataUrl(receiptImageUrl(receipt)).catch(() => ''));
   if (!source) return null;
-  return normalizeImageDataUrlForPdf(source).catch(() => ({ src: source, format: imageFormatForDataUrl(source) }));
+  const image = await normalizeImageDataUrlForPdf(source).catch(() => ({ src: source, format: imageFormatForDataUrl(source) }));
+  if (cacheKey) receiptImageDataUrlCache.set(cacheKey, image);
+  return image;
 }
 
 function drawReceiptAppendixCell(doc, receipt, image, x, y, width, height) {
@@ -4981,72 +5089,29 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div v-if="state.calculator.open" class="calculator-overlay" role="dialog" aria-label="Calculator">
-      <section class="calculator-panel">
-        <header>
-          <strong>Calculator</strong>
-          <button class="icon" type="button" @click="closeCalculator">Close</button>
-        </header>
-        <div class="calculator-display">
-          <span>{{ state.calculator.history }}</span>
-          <strong>{{ state.calculator.display }}</strong>
-        </div>
-        <div class="calculator-keys">
-          <button type="button" class="utility" @click="calculatorClear">C</button>
-          <button type="button" class="utility" @click="calculatorToggleSign">+/-</button>
-          <button type="button" class="utility" @click="calculatorPercent">%</button>
-          <button type="button" class="operator" @click="calculatorChooseOperator('/')">/</button>
-          <button type="button" @click="calculatorInputDigit(7)">7</button>
-          <button type="button" @click="calculatorInputDigit(8)">8</button>
-          <button type="button" @click="calculatorInputDigit(9)">9</button>
-          <button type="button" class="operator" @click="calculatorChooseOperator('*')">x</button>
-          <button type="button" @click="calculatorInputDigit(4)">4</button>
-          <button type="button" @click="calculatorInputDigit(5)">5</button>
-          <button type="button" @click="calculatorInputDigit(6)">6</button>
-          <button type="button" class="operator" @click="calculatorChooseOperator('-')">-</button>
-          <button type="button" @click="calculatorInputDigit(1)">1</button>
-          <button type="button" @click="calculatorInputDigit(2)">2</button>
-          <button type="button" @click="calculatorInputDigit(3)">3</button>
-          <button type="button" class="operator" @click="calculatorChooseOperator('+')">+</button>
-          <button type="button" @click="calculatorBackspace">Del</button>
-          <button type="button" @click="calculatorInputDigit(0)">0</button>
-          <button type="button" @click="calculatorInputDecimal">.</button>
-          <button type="button" class="equals" @click="calculatorEquals">=</button>
-        </div>
-      </section>
-    </div>
+    <CalculatorOverlay
+      :open="state.calculator.open"
+      :display="state.calculator.display"
+      :history="state.calculator.history"
+      @close="closeCalculator"
+      @clear="calculatorClear"
+      @toggle-sign="calculatorToggleSign"
+      @percent="calculatorPercent"
+      @operator="calculatorChooseOperator"
+      @digit="calculatorInputDigit"
+      @backspace="calculatorBackspace"
+      @decimal="calculatorInputDecimal"
+      @equals="calculatorEquals"
+    />
 
-    <aside v-if="state.ai.chatOpen" class="ai-chat-drawer" role="dialog" aria-label="Julie report assistant">
-      <header>
-        <div class="julie-title">
-          <span class="julie-avatar" aria-hidden="true"><i></i></span>
-          <div>
-            <strong>Julie</strong>
-            <span>Julie uses Claude to review your report. You approve all changes.</span>
-          </div>
-        </div>
-        <button class="secondary" type="button" @click="closeAiChat">Close</button>
-      </header>
-      <div class="ai-chat-messages">
-        <p
-          v-for="(message, index) in state.ai.chatMessages"
-          :key="`${message.role}-${index}`"
-          :class="message.role"
-        >
-          {{ message.content }}
-        </p>
-      </div>
-      <form class="ai-chat-form" @submit.prevent="sendAiChatMessage">
-        <label class="field-group">
-          <span class="field-label">Ask Julie About This Report</span>
-          <textarea v-model="state.ai.chatInput" rows="3" placeholder="Ask Julie what needs fixing before I email this package..." spellcheck="true"></textarea>
-        </label>
-        <button type="submit" :disabled="state.ai.chatLoading || !state.ai.chatInput.trim()">
-          <span v-if="state.ai.chatLoading" class="loading-spinner small" aria-hidden="true"></span>
-          {{ state.ai.chatLoading ? 'Asking Julie...' : 'Ask Julie' }}
-        </button>
-      </form>
-    </aside>
+    <JulieChatDrawer
+      v-model:input="state.ai.chatInput"
+      :open="state.ai.chatOpen"
+      :messages="state.ai.chatMessages"
+      :loading="state.ai.chatLoading"
+      @close="closeAiChat"
+      @submit="sendAiChatMessage"
+    />
 
     <nav class="tabs" aria-label="Main views">
       <button
@@ -5056,13 +5121,14 @@ onBeforeUnmount(() => {
         type="button"
         @click="key === 'print' ? openPrintView() : (state.tab = key)"
       >
-        {{ label }}
+        <span>{{ label }}</span>
+        <small v-if="tabBadge(key)">{{ tabBadge(key) }}</small>
       </button>
     </nav>
 
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
     <p v-if="state.duplicateWarning" class="status-message">{{ state.duplicateWarning }}</p>
-    <p v-if="state.saveNotice" class="save-toast" :class="{ failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">{{ state.saveNotice }}</p>
+    <p v-if="state.saveNotice" class="save-toast" :class="{ failed: ['MongoDB save failed', 'Cloud save failed', 'Save failed - cached on this device'].includes(state.lastSaveStatus) }">{{ state.saveNotice }}</p>
     <div v-if="state.undo" class="undo-bar">
       <span>{{ state.undo.label }}</span>
       <button type="button" @click="undoLastCrudAction">Undo</button>
@@ -5092,6 +5158,19 @@ onBeforeUnmount(() => {
           <p><span>Total Due</span><strong>{{ money.format(totalDue) }}</strong></p>
           <p><span>Last Saved</span><strong>{{ state.lastSavedAt ? formatDateTime(state.lastSavedAt) : 'Not saved' }}</strong></p>
           <p><span>Receipts Queued</span><strong>{{ state.receiptQueue.length }}</strong></p>
+        </div>
+      </div>
+
+      <div class="dashboard-panel save-health-panel" :class="saveHealthClass">
+        <div class="sheet-title-row">
+          <span>Save Health</span>
+          <strong>{{ saveHealthStatus }}</strong>
+        </div>
+        <div class="mini-summary">
+          <p><span>Cloud</span><strong>{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</strong></p>
+          <p><span>Status</span><strong>{{ state.lastSaveStatus }}</strong></p>
+          <p><span>Last Confirmed</span><strong>{{ state.lastSavedAt ? formatDateTime(state.lastSavedAt) : 'Not saved' }}</strong></p>
+          <p><span>Detail</span><strong>{{ saveHealthDetail }}</strong></p>
         </div>
       </div>
 
@@ -5149,6 +5228,7 @@ onBeforeUnmount(() => {
       <div class="dashboard-panel quick-entry-panel">
         <div class="sheet-title-row"><span>Quick entry</span><strong>{{ projectReviewItems.length ? `${projectReviewItems.length} review items` : 'Ready' }}</strong></div>
         <div class="quick-entry-actions">
+          <button type="button" @click="goToEntry('statement')">Continue report</button>
           <button type="button" @click="goToEntry('expenses', 'receipt')">Capture receipt</button>
           <button class="secondary" type="button" @click="goToEntry('mileage')">Add mileage</button>
           <button class="secondary" type="button" @click="goToEntry('worklog')">Add work log</button>
@@ -5387,7 +5467,7 @@ onBeforeUnmount(() => {
           <p v-if="state.admin.status" class="sync-status">{{ state.admin.status }}</p>
           <p v-if="state.admin.error" class="status-message">{{ state.admin.error }}</p>
           <div class="member-list">
-            <article v-for="member in state.admin.members" :key="member.id" :class="{ disabled: member.status === 'disabled' }">
+            <article v-for="member in visibleMembers" :key="member.id" :class="{ disabled: member.status === 'disabled' }">
               <div>
                 <h3>{{ member.name || 'Member' }}</h3>
                 <p>#{{ member.accountNumber }} | {{ member.role }} | {{ member.status }}</p>
@@ -5404,6 +5484,9 @@ onBeforeUnmount(() => {
               <button class="secondary" type="button" @click="toggleMemberStatus(member)">{{ member.status === 'active' ? 'Disable' : 'Reactivate' }}</button>
             </article>
           </div>
+          <button v-if="visibleMembers.length < state.admin.members.length" class="secondary" type="button" @click="showMoreRows('members', state.admin.members.length)">
+            Show more members
+          </button>
         </section>
       </div>
     </section>
@@ -5422,8 +5505,9 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="state.recoveryStatus" class="sync-status">{{ state.recoveryStatus }}</p>
       <p v-if="state.archiveFilter === 'trash'" class="save-confirmation pending">Trash contains soft-deleted projects. Restore a project to edit it again.</p>
+      <p v-if="!archiveProjects.length" class="empty-state">No projects in this view yet.</p>
       <div class="archive-list">
-        <article v-for="project in archiveProjects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
+        <article v-for="project in visibleArchiveProjects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
           <div>
             <h3>{{ projectTitle(project) }}</h3>
             <p>{{ project.status }} <span v-if="project.periodFrom">| {{ project.periodFrom }} to {{ project.periodTo }}</span></p>
@@ -5445,6 +5529,9 @@ onBeforeUnmount(() => {
           <button v-if="project.status !== 'deleted'" class="danger" type="button" @click="deleteProject(project)">Delete</button>
         </article>
       </div>
+      <button v-if="visibleArchiveProjects.length < archiveProjects.length" class="secondary" type="button" @click="showMoreRows('archive', archiveProjects.length)">
+        Show more projects
+      </button>
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
@@ -5594,7 +5681,7 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </div>
-        <p class="save-confirmation loading-inline" :class="{ cloud: ['Saved successfully', 'Autosaved', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">
+        <p class="save-confirmation loading-inline" :class="{ cloud: ['Saved successfully', 'Autosaved to MongoDB', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Unsaved changes', 'Autosave pending...', 'Autosaving...', 'Saving...', 'Save pending...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed', 'Save failed - cached on this device'].includes(state.lastSaveStatus) }">
           <span v-if="state.saving" class="loading-spinner small" aria-hidden="true"></span>
           {{ state.saving ? 'Saving...' : state.lastSaveStatus }}
         </p>
@@ -5751,7 +5838,8 @@ onBeforeUnmount(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in data.expenseRows" :key="row.id">
+              <tr v-if="!data.expenseRows.length"><td colspan="12">No expenses yet. Capture a receipt or add an expense line.</td></tr>
+              <tr v-for="row in visibleExpenseRows" :key="row.id">
                 <td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td>
                 <td v-for="category in categories" :key="category">{{ row.category === category ? money.format(row.amount) : '' }}</td>
                 <td>{{ money.format(row.amount) }}</td>
@@ -5772,10 +5860,14 @@ onBeforeUnmount(() => {
             </tfoot>
           </table>
         </div>
+        <button v-if="visibleExpenseRows.length < data.expenseRows.length" class="secondary" type="button" @click="showMoreRows('expenses', data.expenseRows.length)">
+          Show more expenses
+        </button>
 
+        <p v-if="!data.receipts.length" class="empty-state">No receipts saved yet. Use Receipt OCR to attach accountant-ready proof.</p>
         <div class="receipt-grid">
-          <article v-for="receipt in data.receipts" :key="receipt.id">
-            <img v-if="receiptImageUrl(receipt)" :src="receiptImageUrl(receipt)" :alt="receipt.vendor || 'Receipt'" />
+          <article v-for="receipt in visibleReceipts" :key="receipt.id">
+            <img v-if="receiptImageUrl(receipt)" :src="receiptImageUrl(receipt)" :alt="receipt.vendor || 'Receipt'" loading="lazy" decoding="async" />
             <div>
               <h3>{{ receipt.vendor || 'Receipt' }}</h3>
               <p>{{ receipt.date }} | {{ receipt.category }} | {{ money.format(receipt.amount || 0) }}</p>
@@ -5785,6 +5877,9 @@ onBeforeUnmount(() => {
             </div>
           </article>
         </div>
+        <button v-if="visibleReceipts.length < data.receipts.length" class="secondary" type="button" @click="showMoreRows('receipts', data.receipts.length, initialReceiptLimit)">
+          Show more receipts
+        </button>
       </div>
     </section>
 
@@ -5990,7 +6085,8 @@ onBeforeUnmount(() => {
             <table class="sheet-table mileage-table">
               <thead><tr><th>Type</th><th>Route</th><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="row in data.mileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
+                <tr v-if="!data.mileageRows.length"><td colspan="10">No mileage rows yet. Add a manual trip, use saved locations, or start GPS capture.</td></tr>
+                <tr v-for="row in visibleMileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
                   <td>{{ row.trackingMode === 'gps' ? 'GPS' : row.calculationMode === 'address-route' ? 'Auto' : 'Manual' }}</td>
                   <td>
                     <button v-if="rowRoutePoints(row).length" class="route-thumbnail-button" type="button" title="Show route map" @click="selectMileageRoute(row)">
@@ -6018,6 +6114,9 @@ onBeforeUnmount(() => {
               <tfoot><tr><td colspan="6">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td></td><td>{{ money.format(mileageTotal) }}</td><td></td></tr></tfoot>
             </table>
           </div>
+          <button v-if="visibleMileageRows.length < data.mileageRows.length" class="secondary" type="button" @click="showMoreRows('mileage', data.mileageRows.length)">
+            Show more mileage
+          </button>
           <aside class="summary-box">
             <h3>Trip Summary</h3>
             <p><span>Total Miles</span><strong>{{ number.format(totalMiles) }}</strong></p>
@@ -6127,7 +6226,8 @@ onBeforeUnmount(() => {
           <table class="sheet-table wide-table">
             <thead><tr><th>#</th><th>Date</th><th>Client / Site</th><th>Location</th><th>Task Category</th><th>Hours</th><th>Work Summary</th><th>Key Findings / Actions</th><th>Status</th><th>Mileage</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="(row, index) in data.workLogs" :key="row.id">
+              <tr v-if="!data.workLogs.length"><td colspan="11">No work logs yet. Use Daily Quick Add or generate weekdays from statement dates.</td></tr>
+              <tr v-for="(row, index) in visibleWorkLogs" :key="row.id">
                 <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.clientSite }}</td><td>{{ row.location }}</td><td>{{ row.taskCategory }}</td><td>{{ row.hours }}</td><td>{{ row.summary }}</td><td>{{ row.actions }}</td><td>{{ row.status }}</td><td>{{ hasMileageForDate(row.date) ? 'Yes' : 'Missing' }}</td>
                 <td>
                   <button class="icon" type="button" @click="editWorkLog(row)">Edit</button>
@@ -6137,6 +6237,9 @@ onBeforeUnmount(() => {
             </tbody>
           </table>
         </div>
+        <button v-if="visibleWorkLogs.length < data.workLogs.length" class="secondary" type="button" @click="showMoreRows('workLogs', data.workLogs.length)">
+          Show more work logs
+        </button>
         <div class="summary-strip">
           <span>Total Entries <strong>{{ data.workLogs.length }}</strong></span>
           <span>Total Hours <strong>{{ number.format(totalHours) }}</strong></span>

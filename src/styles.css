@@ -61,6 +61,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  min-width: 0;
   min-height: var(--touch-target);
   border: 0;
   border-radius: 6px;
@@ -71,6 +72,12 @@ button {
   overflow-wrap: anywhere;
   white-space: normal;
   cursor: pointer;
+  text-align: center;
+}
+
+button > span,
+button > small {
+  min-width: 0;
 }
 
 button:disabled {
@@ -557,6 +564,9 @@ h3 {
 
 .brand-lockup h1,
 .mode-pill,
+.table-scroll td,
+.table-scroll th,
+button,
 .weather-card strong,
 .weather-card span,
 .sheet-title-row,
@@ -582,22 +592,34 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.table-scroll td,
+.table-scroll th {
+  max-width: min(280px, 72vw);
+}
+
 .icon-button {
   display: grid;
-  width: 42px;
+  width: var(--touch-target);
+  height: var(--touch-target);
+  min-width: var(--touch-target);
   min-height: var(--touch-target);
+  padding: 0;
   place-items: center;
   border: 1px solid #c8d1d6;
   background: white;
   color: #263238;
+  flex: 0 0 var(--touch-target);
+  overflow: hidden;
 }
 
 .calculator-icon {
   display: grid;
-  grid-template-columns: repeat(2, 6px);
-  grid-template-rows: 8px repeat(2, 6px);
-  gap: 3px;
-  width: 21px;
+  grid-template-columns: repeat(2, 5px);
+  grid-template-rows: 7px repeat(2, 5px);
+  gap: 2px;
+  width: 22px;
+  height: 24px;
+  box-sizing: border-box;
   border: 2px solid currentColor;
   border-radius: 4px;
   padding: 3px;
@@ -737,9 +759,27 @@ h3 {
   padding: 0 16px;
 }
 
+.tabs button small {
+  display: inline-grid;
+  min-width: 21px;
+  height: 21px;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 6px;
+  background: #eef2f4;
+  color: #4b5a60;
+  font-size: 11px;
+  font-weight: 900;
+}
+
 .tabs button.active {
   border-color: #4b5a60;
   background: #4b5a60;
+  color: white;
+}
+
+.tabs button.active small {
+  background: #c91f2f;
   color: white;
 }
 
@@ -865,6 +905,32 @@ h3 {
 .dashboard-grid article {
   display: grid;
   gap: 8px;
+}
+
+.save-health-panel {
+  border-left: 4px solid #4b5a60;
+}
+
+.save-health-panel.cloud {
+  border-left-color: #178a5f;
+}
+
+.save-health-panel.pending {
+  border-left-color: #d69b00;
+}
+
+.save-health-panel.failed {
+  border-left-color: #c91f2f;
+}
+
+.empty-state {
+  border: 1px dashed #c8d1d6;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fbfcfd;
+  color: #4b5a60;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-grid span {
@@ -2413,6 +2479,9 @@ h3 {
   }
 
   .header-actions .icon-button {
+    width: var(--touch-target);
+    max-width: var(--touch-target);
+    justify-self: start;
     flex: 0 0 var(--touch-target);
   }
 
@@ -2558,6 +2627,12 @@ h3 {
     font-size: 14px;
   }
 
+  .header-actions .icon-button {
+    width: var(--touch-target);
+    max-width: var(--touch-target);
+    padding: 0;
+  }
+
   .mode-pill {
     font-size: 12px;
   }
@@ -2656,6 +2731,19 @@ button.secondary {
   border-color: var(--wls-border);
   background: var(--wls-surface);
   color: var(--wls-charcoal);
+}
+
+button.icon-button {
+  border: 1px solid var(--wls-border);
+  background: var(--wls-surface);
+  color: var(--wls-charcoal);
+}
+
+button.icon-button:not(:disabled):hover,
+button.icon-button:not(:disabled):focus-visible {
+  border-color: var(--wls-red);
+  background: var(--wls-surface);
+  color: var(--wls-black);
 }
 
 button.secondary:not(:disabled):hover,

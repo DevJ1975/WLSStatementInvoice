@@ -5,6 +5,16 @@ const maxOcrChars = 700;
 const maxChatMessages = 8;
 const maxChatChars = 1200;
 
+const wlsReviewRules = [
+  'Statement fields are the source of truth for billing identity, dates, labor, and total due.',
+  'Every reimbursable expense should have accountant receipt evidence and a matching receipt reference.',
+  'Receipt metadata should match the linked expense row for date, amount, vendor, and category when available.',
+  'Mileage rows should have valid dates, positive miles, a valid rate, From/To locations, and saved route data when route-calculated.',
+  'Work logs support the billing narrative; draft rows, missing hours, out-of-period rows, and onsite/travel work without mileage need user review.',
+  'Duplicate-looking expenses or mileage rows should be flagged for review, not silently removed.',
+  'Julie is advisory: she shows needs-attention items, warnings, suggestions, readiness, and next actions without blocking file viewing or downloads.',
+];
+
 function moneyNumber(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? Math.round(number * 100) / 100 : 0;
@@ -79,6 +89,47 @@ function duplicateKey(parts) {
   return parts.map((part) => String(part || '').trim().toLowerCase()).join('|');
 }
 
+function normalizedText(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function receiptReferenceForExpense(data, row) {
+  const receiptIndex = data.receipts.findIndex((receipt) => receipt.expenseId === row.id || receipt.id === row.receiptId);
+  return receiptIndex >= 0 ? `Receipt row ${receiptIndex + 1}` : '';
+}
+
+function receiptMatchFindings(row, receipt) {
+  if (!receipt) return ['missing receipt evidence'];
+  const findings = [];
+  const rowAmount = Number(row.amount || 0);
+  const receiptAmount = Number(receipt.amount || 0);
+  if (receiptAmount && rowAmount && Math.abs(receiptAmount - rowAmount) > 0.02) findings.push('amount mismatch');
+  if (row.date && receipt.date && row.date !== receipt.date) findings.push('date mismatch');
+  if (normalizedText(row.vendor) && normalizedText(receipt.vendor) && normalizedText(row.vendor) !== normalizedText(receipt.vendor)) {
+    findings.push('vendor mismatch');
+  }
+  if (normalizedText(row.category) && normalizedText(receipt.category) && normalizedText(row.category) !== normalizedText(receipt.category)) {
+    findings.push('category mismatch');
+  }
+  if (!receipt.imageFileId && !receipt.imageUrl && !receipt.previewUrl) findings.push('receipt image unavailable');
+  return findings.length ? findings : ['matched'];
+}
+
+function mileageExistsForDate(data, date) {
+  return Boolean(date && data.mileageRows.some((row) => row.date === date && Number(row.miles || 0) > 0));
+}
+
+function projectSaveMetadata(project, options = {}) {
+  const saveState = options.saveState || project?.saveState || project?.clientSaveState || project?.syncState || {};
+  return {
+    storage: saveState.storage || project?.storage || project?.storageStatus || '',
+    status: saveState.status || saveState.lastSaveStatus || '',
+    hasUnsavedChanges: Boolean(saveState.hasUnsavedChanges || project?.hasUnsavedChanges || project?.dirty),
+    lastSavedAt: saveState.lastSavedAt || project?.lastSavedAt || null,
+    verifiedAt: saveState.verifiedAt || project?.verifiedAt || null,
+  };
+}
+
 function deterministicPreflight(project, options = {}) {
   const data = normalizeProjectData(project?.data || project);
   const critical = [];
@@ -87,6 +138,14 @@ function deterministicPreflight(project, options = {}) {
   const report = data.report;
   const meta = data.meta;
   const exportType = options.exportType || 'review';
+  const saveState = projectSaveMetadata(project, options);
+
+  if (saveState.hasUnsavedChanges) {
+    warnings.push(issue('warning', 'This project has unsaved changes. Press Save or wait for MongoDB autosave before emailing final files.', 'saveState.hasUnsavedChanges'));
+  }
+  if (saveState.storage && !/mongo/i.test(saveState.storage)) {
+    warnings.push(issue('warning', `Current save state appears to be ${saveState.storage}, not confirmed MongoDB persistence.`, 'saveState.storage'));
+  }
 
   [
     ['Client name', meta.clientName, 'meta.clientName'],
@@ -128,13 +187,29 @@ function deterministicPreflight(project, options = {}) {
     expenseKeys.add(key);
 
     if (rowReceipt) {
-      const receiptAmount = Number(rowReceipt.amount || 0);
-      if (receiptAmount && amount && Math.abs(receiptAmount - amount) > 0.02) {
+      const matchFindings = receiptMatchFindings(row, rowReceipt);
+      if (matchFindings.includes('amount mismatch')) {
         warnings.push(issue('warning', `${rowLabel} amount does not match its receipt metadata.`, `expenseRows.${index}.amount`));
       }
-      if (!rowReceipt.imageFileId && !rowReceipt.imageUrl && !rowReceipt.previewUrl) {
+      if (matchFindings.includes('date mismatch')) {
+        warnings.push(issue('warning', `${rowLabel} date does not match its linked receipt date.`, `expenseRows.${index}.date`));
+      }
+      if (matchFindings.includes('vendor mismatch')) {
+        warnings.push(issue('warning', `${rowLabel} vendor does not match its linked receipt vendor.`, `expenseRows.${index}.vendor`));
+      }
+      if (matchFindings.includes('category mismatch')) {
+        warnings.push(issue('warning', `${rowLabel} category does not match its linked receipt category.`, `expenseRows.${index}.category`));
+      }
+      if (matchFindings.includes('receipt image unavailable')) {
         warnings.push(issue('warning', `${rowLabel} receipt metadata exists but the receipt image may be unavailable.`, `receipts.${rowReceipt.id}`));
       }
+    }
+  });
+
+  data.receipts.forEach((receipt, index) => {
+    const hasLinkedExpense = data.expenseRows.some((row) => row.id === receipt.expenseId || row.receiptId === receipt.id);
+    if (!hasLinkedExpense) {
+      warnings.push(issue('warning', `Receipt row ${index + 1} is not linked to an expense row.`, `receipts.${index}.expenseId`));
     }
   });
 
@@ -162,6 +237,9 @@ function deterministicPreflight(project, options = {}) {
     if (!insidePeriod(row.date, report.periodFrom, report.periodTo)) warnings.push(issue('warning', `${rowLabel} date is outside the report period.`, `workLogs.${index}.date`));
     if (String(row.status || '').toLowerCase() === 'draft') warnings.push(issue('warning', `${rowLabel} is still marked Draft.`, `workLogs.${index}.status`));
     if (!Number(row.hours || 0)) warnings.push(issue('warning', `${rowLabel} is missing hours.`, `workLogs.${index}.hours`));
+    if (/onsite|travel/i.test(row.taskCategory || row.summary || '') && row.date && !mileageExistsForDate(data, row.date)) {
+      warnings.push(issue('warning', `${rowLabel} has onsite/travel work but no mileage row for ${row.date}.`, `workLogs.${index}.date`));
+    }
     if (!row.summary && !row.actions) suggestions.push(issue('suggestion', `${rowLabel} could use a short generated summary.`, `workLogs.${index}.summary`));
   });
 
@@ -197,8 +275,11 @@ function deterministicPreflight(project, options = {}) {
 function compactProjectForAi(project, options = {}) {
   const data = normalizeProjectData(project?.data || project);
   const totals = calculateProjectTotals(data);
+  const saveState = projectSaveMetadata(project, options);
   return {
     exportType: options.exportType || 'review',
+    businessRules: wlsReviewRules,
+    saveState,
     project: {
       id: String(project?._id || project?.id || ''),
       title: project?.title || '',
@@ -208,16 +289,22 @@ function compactProjectForAi(project, options = {}) {
     meta: data.meta,
     report: data.report,
     totals,
-    expenses: data.expenseRows.map((row, index) => ({
-      row: index + 1,
-      id: row.id || '',
-      date: row.date || '',
-      vendor: row.vendor || '',
-      description: row.description || '',
-      category: row.category || '',
-      amount: moneyNumber(row.amount),
-      receiptId: row.receiptId || '',
-    })),
+    expenses: data.expenseRows.map((row, index) => {
+      const linkedReceipt = receiptForExpense(data, row);
+      return {
+        row: index + 1,
+        id: row.id || '',
+        date: row.date || '',
+        vendor: row.vendor || '',
+        description: row.description || '',
+        category: row.category || '',
+        amount: moneyNumber(row.amount),
+        receiptId: row.receiptId || '',
+        receiptReference: receiptReferenceForExpense(data, row),
+        receiptMatchStatus: receiptMatchFindings(row, linkedReceipt),
+        hasReceiptImage: Boolean(linkedReceipt?.imageFileId || linkedReceipt?.imageUrl || linkedReceipt?.previewUrl),
+      };
+    }),
     mileage: data.mileageRows.map((row, index) => ({
       row: index + 1,
       id: row.id || '',
@@ -230,6 +317,7 @@ function compactProjectForAi(project, options = {}) {
       amount: moneyNumber(Number(row.miles || 0) * Number(row.rate || 0)),
       mode: row.trackingMode || row.calculationMode || 'manual',
       hasRoute: Boolean(row.routeGeometry?.length || row.routePoints?.length),
+      dateInPeriod: insidePeriod(row.date, data.report.periodFrom, data.report.periodTo),
     })),
     workLogs: data.workLogs.map((row, index) => ({
       row: index + 1,
@@ -240,30 +328,41 @@ function compactProjectForAi(project, options = {}) {
       status: row.status || '',
       summary: row.summary || '',
       actions: row.actions || '',
+      dateInPeriod: insidePeriod(row.date, data.report.periodFrom, data.report.periodTo),
+      hasMileageForDate: mileageExistsForDate(data, row.date),
     })),
-    receipts: data.receipts.map((receipt, index) => ({
-      row: index + 1,
-      id: receipt.id || '',
-      expenseId: receipt.expenseId || '',
-      vendor: receipt.vendor || '',
-      date: receipt.date || '',
-      amount: moneyNumber(receipt.amount),
-      category: receipt.category || '',
-      hasImage: Boolean(receipt.imageFileId || receipt.imageUrl || receipt.previewUrl),
-      ocrText: String(receipt.ocrText || '').slice(0, maxOcrChars),
-    })),
+    receipts: data.receipts.map((receipt, index) => {
+      const linkedExpenseIndex = data.expenseRows.findIndex((row) => row.id === receipt.expenseId || row.receiptId === receipt.id);
+      const linkedExpense = linkedExpenseIndex >= 0 ? data.expenseRows[linkedExpenseIndex] : null;
+      return {
+        row: index + 1,
+        id: receipt.id || '',
+        expenseId: receipt.expenseId || '',
+        linkedExpenseRow: linkedExpenseIndex >= 0 ? linkedExpenseIndex + 1 : null,
+        vendor: receipt.vendor || '',
+        date: receipt.date || '',
+        amount: moneyNumber(receipt.amount),
+        category: receipt.category || '',
+        paymentMethod: receipt.paymentMethod || '',
+        notes: receipt.notes || '',
+        hasImage: Boolean(receipt.imageFileId || receipt.imageUrl || receipt.previewUrl),
+        matchStatus: linkedExpense ? receiptMatchFindings(linkedExpense, receipt) : ['no linked expense row'],
+        ocrText: String(receipt.ocrText || '').slice(0, maxOcrChars),
+      };
+    }),
   };
 }
 
 function aiSystemPrompt() {
   return [
     'You are Julie, the WLS Expense Invoicer report assistant.',
-    'Your job is to review the current expense report project: statement, expenses, mileage, work logs, receipts, totals, PDF readiness, and Excel readiness.',
+    'Your job is to review the current WLS accounting package: statement, expenses, mileage, work logs, receipts, totals, PDF readiness, Excel readiness, and next actions.',
     'You are not a general coding assistant inside this app.',
     'Do not provide code snippets, implementation advice, file paths, API route names, database schema advice, or developer instructions unless the user explicitly asks for software development help.',
     'If the user asks to check for errors, review this report, find issues, or decide whether it is ready to send, focus only on the current report data and deterministic review results.',
     'When reviewing a report, reference exact row numbers when possible, such as Expense row 1, Mileage row 2, Work log row 3, or receipt references.',
     'Never claim the report is perfect. Say whether it appears ready based on the provided data.',
+    'Do not tell the user that viewing, printing, exporting, or downloading is blocked. Julie is advisory: show needs-attention items, warnings, suggestions, readiness, and next actions.',
     'Do not invent records, do not request secrets, and do not suggest automatic edits.',
     'Prioritize: required statement fields, receipt evidence, date consistency, totals, duplicate-looking entries, work-log/mileage alignment, and package readiness.',
     'Return only JSON when asked for a preflight review.',
@@ -272,12 +371,12 @@ function aiSystemPrompt() {
 
 function preflightUserPrompt(compactProject, deterministicReview) {
   return JSON.stringify({
-    task: 'Review this WLS accounting package for errors before download/email. Return JSON only with keys critical, warnings, suggestions, summary. Julie is advisory and should not say that file viewing, printing, or downloads are blocked.',
+    task: 'Review this WLS accounting package for errors before download/email. Return JSON only with keys critical, warnings, suggestions, summary. Treat critical as needs-attention items for user review, not file-action blockers. Julie is advisory and should not say that file viewing, printing, or downloads are blocked.',
     expectedShape: {
-      critical: ['Serious issues the user should review before emailing, but not file-action blockers.'],
+      critical: ['Needs-attention issues the user should review before emailing, but not file-action blockers.'],
       warnings: ['Issues user can acknowledge if intentional.'],
       suggestions: ['Helpful cleanup ideas.'],
-      summary: 'One short plain-English review summary.',
+      summary: 'One short plain-English review summary with the most useful next action.',
     },
     deterministicReview,
     compactProject,
@@ -356,9 +455,9 @@ function mergeReviews(deterministic, claudeJson = {}) {
       typeof claudeJson.summary === 'string' && claudeJson.summary.trim()
         ? claudeJson.summary.trim().slice(0, 500)
         : critical.length
-          ? 'Critical issues must be fixed before this package is ready.'
+          ? 'Julie found needs-attention items to review before emailing.'
           : warnings.length
-            ? 'The package has warnings to review before final emailing.'
+            ? 'Julie found warnings to review before final emailing.'
             : 'The package appears ready based on the current business rules.',
   };
 }
@@ -428,13 +527,15 @@ function buildChatTask(reportReviewIntent) {
   return {
     mode: 'report-review',
     task: 'Review the current WLS expense report for errors, omissions, and export/email readiness.',
-    responseFormat: ['Critical', 'Warnings', 'Suggestions', 'Ready status'],
+    responseFormat: ['Needs attention', 'Warnings', 'Suggestions', 'Ready status', 'Next 3 actions'],
     responseRules: [
       ...baseRules,
-      'Answer as a short checklist using the headings Critical, Warnings, Suggestions, and Ready status.',
+      'Answer as a short checklist using the headings Needs attention, Warnings, Suggestions, Ready status, and Next 3 actions.',
+      'Do not use Critical as a heading unless quoting an existing issue label; use Needs attention for serious report issues.',
       'Focus on required statement fields, expense receipts, mileage math/routes, work-log dates/status, duplicate-looking rows, totals, and package readiness.',
       'Reference exact row numbers from compactProject when possible, using labels like Expense row 1, Mileage row 2, Work log row 3, and Receipt row 4.',
-      'If there are no critical issues, say that clearly, then list warnings or suggestions.',
+      'If there are no needs-attention issues, say that clearly, then list warnings or suggestions.',
+      'Give practical next actions the user can take inside the report, not software implementation steps.',
     ],
   };
 }
@@ -479,4 +580,5 @@ module.exports = {
   isReportReviewIntent,
   runClaudeChat,
   runClaudePreflight,
+  wlsReviewRules,
 };
