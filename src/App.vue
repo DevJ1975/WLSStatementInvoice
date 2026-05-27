@@ -366,12 +366,12 @@ const workLogCategoryTotals = computed(() =>
 const projectReviewItems = computed(() => buildProjectReviewItems(data.value));
 const aiReviewStatusText = computed(() => {
   const review = state.ai.lastReview || state.currentProject?.aiReviews;
-  if (state.ai.loading) return 'AI reviewing...';
+  if (state.ai.loading) return 'Julie is reviewing...';
   if (!review) return 'Not reviewed';
   const status = review.status || review.lastStatus;
   if (status === 'fail') return 'Critical fixes needed';
   if (status === 'warning') return 'Warnings to review';
-  if (status === 'pass') return 'AI reviewed';
+  if (status === 'pass') return 'Julie reviewed';
   return 'Not reviewed';
 });
 const aiReviewCritical = computed(() => state.ai.lastReview?.critical || []);
@@ -1540,7 +1540,7 @@ function aiIssueText(issue) {
 function acknowledgeAiWarnings() {
   state.ai.warningAcknowledged = true;
   state.ai.error = '';
-  state.saveNotice = 'AI warnings acknowledged. You can continue the export when ready.';
+  state.saveNotice = 'Julie warnings acknowledged. You can continue the export when ready.';
 }
 
 function openAiChat() {
@@ -1548,7 +1548,7 @@ function openAiChat() {
   if (!state.ai.chatMessages.length) {
     state.ai.chatMessages.push({
       role: 'assistant',
-      content: 'Ask me what needs to be fixed before you download or email this package.',
+      content: "I'm Julie. Ask me what needs to be fixed before you download or email this package.",
     });
   }
 }
@@ -1570,7 +1570,7 @@ async function runAiPreflight(exportType = 'review', options = {}) {
       await saveCurrentProject({ requireCloud: true, verifyCloud: exportType !== 'review' });
     }
     if (!isPersistedMongoProject(state.currentProject)) {
-      throw new Error('AI review requires this project to be saved to MongoDB first.');
+      throw new Error('Julie review requires this project to be saved to MongoDB first.');
     }
     const payload = await apiJson('/api/ai/preflight', {
       method: 'POST',
@@ -1586,7 +1586,7 @@ async function runAiPreflight(exportType = 'review', options = {}) {
     saveLocalArchive({ defer: true, updateStatus: false });
     return payload.review;
   } catch (error) {
-    state.ai.error = error.message || 'AI review failed.';
+    state.ai.error = error.message || 'Julie review failed.';
     return null;
   } finally {
     state.ai.loading = false;
@@ -1596,26 +1596,26 @@ async function runAiPreflight(exportType = 'review', options = {}) {
 async function runDashboardAiReview() {
   const review = await runAiPreflight('review');
   if (!review) return;
-  if (review.status === 'pass') state.saveNotice = 'AI review passed. This package appears ready.';
-  if (review.status === 'warning') state.saveNotice = 'AI review found warnings to review.';
-  if (review.status === 'fail') state.saveNotice = 'AI review found critical issues to fix.';
+  if (review.status === 'pass') state.saveNotice = 'Julie review passed. This package appears ready.';
+  if (review.status === 'warning') state.saveNotice = 'Julie review found warnings to review.';
+  if (review.status === 'fail') state.saveNotice = 'Julie review found critical issues to fix.';
 }
 
 async function ensureAiReadyForExport(exportType) {
   const review = await runAiPreflight(exportType);
   if (!review) {
-    state.error = state.ai.error || 'AI review could not be completed.';
+    state.error = state.ai.error || 'Julie review could not be completed.';
     return false;
   }
   if (review.status === 'fail') {
-    state.error = 'AI review found critical issues. Fix them before exporting or printing.';
+    state.error = 'Julie review found critical issues. Fix them before exporting or printing.';
     state.tab = 'dashboard';
     await nextTick();
     window.scrollTo({ top: 0, behavior: 'smooth' });
     return false;
   }
   if (review.status === 'warning' && !state.ai.warningAcknowledged) {
-    state.error = 'AI review found warnings. Review and acknowledge them before continuing.';
+    state.error = 'Julie review found warnings. Review and acknowledge them before continuing.';
     state.tab = 'dashboard';
     await nextTick();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1646,7 +1646,7 @@ async function sendAiChatMessage() {
     });
     state.ai.chatMessages.push({ role: 'assistant', content: payload.reply.message });
   } catch (error) {
-    state.ai.chatMessages.push({ role: 'assistant', content: `I could not reach Claude: ${error.message}` });
+    state.ai.chatMessages.push({ role: 'assistant', content: `Julie could not reach Claude: ${error.message}` });
   } finally {
     state.ai.chatLoading = false;
   }
@@ -2284,6 +2284,7 @@ function resetMemberForm() {
 async function createMember() {
   state.admin.error = '';
   state.admin.status = '';
+  state.admin.loading = true;
   try {
     const payload = await apiJson('/api/members', {
       method: 'POST',
@@ -2294,6 +2295,8 @@ async function createMember() {
     resetMemberForm();
   } catch (error) {
     state.admin.error = error.message;
+  } finally {
+    state.admin.loading = false;
   }
 }
 
@@ -4873,7 +4876,10 @@ onBeforeUnmount(() => {
     <section v-if="!state.auth.checked" class="pin-gate">
       <form>
         <img :src="logoUrl" alt="Workplace Learning System" />
-        <h2>Loading...</h2>
+        <h2 class="loading-inline">
+          <span class="loading-spinner" aria-hidden="true"></span>
+          Loading...
+        </h2>
       </form>
     </section>
 
@@ -4902,7 +4908,10 @@ onBeforeUnmount(() => {
           <input v-model="state.auth.setup.pin" inputmode="numeric" type="password" autocomplete="new-password" placeholder="4+ digits" spellcheck="false" />
         </label>
         <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
-        <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Creating...' : 'Create admin' }}</button>
+        <button type="submit" :disabled="state.auth.loginLoading">
+          <span v-if="state.auth.loginLoading" class="loading-spinner small" aria-hidden="true"></span>
+          {{ state.auth.loginLoading ? 'Creating...' : 'Create admin' }}
+        </button>
       </form>
       <form v-else @submit.prevent="loginWithAccount">
         <img :src="logoUrl" alt="Workplace Learning System" />
@@ -4916,7 +4925,10 @@ onBeforeUnmount(() => {
           <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="Enter PIN" spellcheck="false" />
         </label>
         <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
-        <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Signing in...' : 'Sign in' }}</button>
+        <button type="submit" :disabled="state.auth.loginLoading">
+          <span v-if="state.auth.loginLoading" class="loading-spinner small" aria-hidden="true"></span>
+          {{ state.auth.loginLoading ? 'Signing in...' : 'Sign in' }}
+        </button>
       </form>
     </section>
 
@@ -4939,13 +4951,19 @@ onBeforeUnmount(() => {
             <i></i><b></b><em></em>
           </span>
           <div>
-            <strong>{{ weatherText }}</strong>
+            <strong class="loading-inline">
+              <span v-if="state.header.weatherLoading" class="loading-spinner small" aria-hidden="true"></span>
+              {{ weatherText }}
+            </strong>
             <span>{{ state.header.weather.locationLabel }}</span>
           </div>
         </div>
       </section>
       <div class="header-actions">
-        <span class="mode-pill">{{ syncStatusText }}</span>
+        <span class="mode-pill">
+          <span v-if="state.saving" class="loading-spinner small" aria-hidden="true"></span>
+          {{ syncStatusText }}
+        </span>
         <span class="mode-pill">{{ state.storage === 'mongodb' ? 'MongoDB Cloud' : 'Local fallback' }}</span>
         <button class="icon-button" type="button" title="Calculator" aria-label="Open calculator" @click="toggleCalculator">
           <span class="calculator-icon" aria-hidden="true">
@@ -4953,7 +4971,7 @@ onBeforeUnmount(() => {
           </span>
         </button>
         <span class="mode-pill">#{{ state.auth.member?.accountNumber }} {{ state.auth.member?.role }}</span>
-        <button class="secondary" type="button" @click="openAiChat">Ask AI</button>
+        <button class="secondary" type="button" @click="openAiChat">Ask Julie</button>
         <button class="secondary" type="button" @click="logoutAccount">Logout</button>
         <button class="secondary" type="button" @click="openPrintView">Print View</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
@@ -4999,11 +5017,14 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <aside v-if="state.ai.chatOpen" class="ai-chat-drawer" role="dialog" aria-label="AI report assistant">
+    <aside v-if="state.ai.chatOpen" class="ai-chat-drawer" role="dialog" aria-label="Julie report assistant">
       <header>
-        <div>
-          <strong>AI report assistant</strong>
-          <span>Claude reviews only. You approve all changes.</span>
+        <div class="julie-title">
+          <span class="julie-avatar" aria-hidden="true"><i></i></span>
+          <div>
+            <strong>Julie</strong>
+            <span>Julie uses Claude to review your report. You approve all changes.</span>
+          </div>
         </div>
         <button class="secondary" type="button" @click="closeAiChat">Close</button>
       </header>
@@ -5018,11 +5039,12 @@ onBeforeUnmount(() => {
       </div>
       <form class="ai-chat-form" @submit.prevent="sendAiChatMessage">
         <label class="field-group">
-          <span class="field-label">Ask AI About This Report</span>
-          <textarea v-model="state.ai.chatInput" rows="3" placeholder="Ask what needs fixing before I email this package..." spellcheck="true"></textarea>
+          <span class="field-label">Ask Julie About This Report</span>
+          <textarea v-model="state.ai.chatInput" rows="3" placeholder="Ask Julie what needs fixing before I email this package..." spellcheck="true"></textarea>
         </label>
         <button type="submit" :disabled="state.ai.chatLoading || !state.ai.chatInput.trim()">
-          {{ state.ai.chatLoading ? 'Asking...' : 'Ask AI' }}
+          <span v-if="state.ai.chatLoading" class="loading-spinner small" aria-hidden="true"></span>
+          {{ state.ai.chatLoading ? 'Asking Julie...' : 'Ask Julie' }}
         </button>
       </form>
     </aside>
@@ -5047,7 +5069,10 @@ onBeforeUnmount(() => {
       <button type="button" @click="undoLastCrudAction">Undo</button>
       <button class="secondary" type="button" @click="clearCrudUndo">Dismiss</button>
     </div>
-    <p v-if="state.loading" class="loading">Loading...</p>
+    <p v-if="state.loading" class="loading loading-inline">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      Loading...
+    </p>
 
     <section v-else-if="state.tab === 'dashboard'" class="dashboard-view">
       <div class="dashboard-grid">
@@ -5072,12 +5097,19 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="dashboard-panel ai-review-panel">
-        <div class="sheet-title-row"><span>AI Review</span><strong>{{ aiReviewStatusText }}</strong></div>
+        <div class="sheet-title-row">
+          <span class="julie-title">
+            <span class="julie-avatar" aria-hidden="true"><i></i></span>
+            <span>Julie Review</span>
+          </span>
+          <strong>{{ aiReviewStatusText }}</strong>
+        </div>
         <div class="ai-review-actions">
           <button type="button" :disabled="state.ai.loading" @click="runDashboardAiReview">
-            {{ state.ai.loading ? 'Reviewing...' : 'Run AI Review' }}
+            <span v-if="state.ai.loading" class="loading-spinner small" aria-hidden="true"></span>
+            {{ state.ai.loading ? 'Julie is reviewing...' : 'Run Julie Review' }}
           </button>
-          <button class="secondary" type="button" @click="openAiChat">Ask AI</button>
+          <button class="secondary" type="button" @click="openAiChat">Ask Julie</button>
           <button
             v-if="aiReviewWarnings.length && !aiReviewCritical.length && !state.ai.warningAcknowledged"
             class="secondary"
@@ -5089,7 +5121,7 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="state.ai.error" class="status-message gps-message">{{ state.ai.error }}</p>
         <p v-else-if="state.ai.lastReview?.summary" class="muted">{{ state.ai.lastReview.summary }}</p>
-        <p v-else class="muted">Run AI review before downloading, printing, or preparing files to email.</p>
+        <p v-else class="muted">Run Julie review before downloading, printing, or preparing files to email.</p>
         <div v-if="state.ai.lastReview" class="ai-review-grid">
           <section>
             <h3>Critical</h3>
@@ -5339,13 +5371,19 @@ onBeforeUnmount(() => {
             <span class="field-label">Temporary PIN</span>
             <input v-model="state.admin.form.pin" required inputmode="numeric" type="password" minlength="4" placeholder="4+ digits" spellcheck="false" />
           </label>
-          <button type="submit">Create account</button>
+          <button type="submit" :disabled="state.admin.loading">
+            <span v-if="state.admin.loading" class="loading-spinner small" aria-hidden="true"></span>
+            {{ state.admin.loading ? 'Creating account...' : 'Create account' }}
+          </button>
         </form>
 
         <section class="admin-panel">
           <div class="sheet-title-row">
             <span>Members</span>
-            <button class="secondary" type="button" @click="loadMembers">Refresh</button>
+            <button class="secondary" type="button" :disabled="state.admin.loading" @click="loadMembers">
+              <span v-if="state.admin.loading" class="loading-spinner small" aria-hidden="true"></span>
+              {{ state.admin.loading ? 'Refreshing...' : 'Refresh' }}
+            </button>
           </div>
           <p v-if="state.admin.status" class="sync-status">{{ state.admin.status }}</p>
           <p v-if="state.admin.error" class="status-message">{{ state.admin.error }}</p>
@@ -5557,10 +5595,14 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </div>
-        <p class="save-confirmation" :class="{ cloud: ['Saved successfully', 'Autosaved', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">
+        <p class="save-confirmation loading-inline" :class="{ cloud: ['Saved successfully', 'Autosaved', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">
+          <span v-if="state.saving" class="loading-spinner small" aria-hidden="true"></span>
           {{ state.saving ? 'Saving...' : state.lastSaveStatus }}
         </p>
-        <button type="submit" :disabled="state.saving">{{ state.saving ? 'Saving...' : 'Save' }}</button>
+        <button type="submit" :disabled="state.saving">
+          <span v-if="state.saving" class="loading-spinner small" aria-hidden="true"></span>
+          {{ state.saving ? 'Saving...' : 'Save' }}
+        </button>
       </form>
 
       <div class="statement-sheet">
@@ -5651,7 +5693,10 @@ onBeforeUnmount(() => {
             <input ref="receiptFileInput" type="file" accept="image/*" capture="environment" spellcheck="false" aria-label="Receipt photo or image upload" @change="handleReceiptFile" />
             <span class="field-hint">Take a photo on mobile or upload an image.</span>
           </label>
-          <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
+          <p v-if="state.receiptOcrRunning" class="muted loading-inline">
+            <span class="loading-spinner small" aria-hidden="true"></span>
+            Reading receipt...
+          </p>
           <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
           <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
           <label class="field-group">
@@ -5684,6 +5729,7 @@ onBeforeUnmount(() => {
             Missing {{ receiptDraftMissingFields.join(', ') }} before saving.
           </p>
           <button type="submit" :disabled="!state.receiptDraft.imageBlob || state.receiptUploading || receiptDraftMissingFields.length">
+            <span v-if="state.receiptUploading" class="loading-spinner small" aria-hidden="true"></span>
             {{ state.receiptUploading ? 'Saving receipt...' : 'Save receipt and expense' }}
           </button>
         </form>
@@ -5843,8 +5889,14 @@ onBeforeUnmount(() => {
               <input v-model="mileageForm.rate" type="number" min="0" step="0.001" placeholder="0.725" required />
             </label>
           </div>
-          <p v-if="state.places.loadingField" class="muted">Looking up {{ state.places.loadingField }} address...</p>
-          <p v-if="state.places.routeLoading" class="muted">Calculating driving mileage...</p>
+          <p v-if="state.places.loadingField" class="muted loading-inline">
+            <span class="loading-spinner small" aria-hidden="true"></span>
+            Looking up {{ state.places.loadingField }} address...
+          </p>
+          <p v-if="state.places.routeLoading" class="muted loading-inline">
+            <span class="loading-spinner small" aria-hidden="true"></span>
+            Calculating driving mileage...
+          </p>
           <p v-if="state.places.error" class="status-message gps-message">{{ state.places.error }}</p>
           <p v-if="mileageForm.calculationMode === 'address-route'" class="muted">
             Driving mileage calculated from selected addresses. Miles remain editable.
@@ -5876,6 +5928,7 @@ onBeforeUnmount(() => {
           <p v-if="state.preferences.error" class="status-message gps-message">{{ state.preferences.error }}</p>
           <p v-if="state.preferences.status" class="sync-status">{{ state.preferences.status }}</p>
           <button type="button" :disabled="state.preferences.saving" @click="addSavedMileageLocation">
+            <span v-if="state.preferences.saving" class="loading-spinner small" aria-hidden="true"></span>
             {{ state.preferences.saving ? 'Saving location...' : 'Save location' }}
           </button>
           <div v-if="savedMileageLocations.length" class="saved-location-list">
@@ -5895,6 +5948,7 @@ onBeforeUnmount(() => {
             <p class="muted">Create reviewable mileage drafts for work-log dates without mileage.</p>
           </div>
           <button class="secondary" type="button" :disabled="state.places.routeLoading" @click="generateWorkLogMileageDrafts">
+            <span v-if="state.places.routeLoading" class="loading-spinner small" aria-hidden="true"></span>
             {{ state.places.routeLoading ? 'Generating...' : 'Generate work-log mileage drafts' }}
           </button>
           <div v-if="state.mileageDrafts.length" class="mileage-draft-list">
