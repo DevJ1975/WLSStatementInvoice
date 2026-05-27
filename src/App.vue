@@ -1548,7 +1548,7 @@ function openAiChat() {
   if (!state.ai.chatMessages.length) {
     state.ai.chatMessages.push({
       role: 'assistant',
-      content: "I'm Julie. Ask me what needs to be fixed before you download or email this package.",
+      content: "I'm Julie. Ask me to check this expense report for missing receipts, date issues, totals, mileage, work logs, or export readiness.",
     });
   }
 }

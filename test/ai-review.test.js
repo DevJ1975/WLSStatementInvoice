@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { compactProjectForAi, deterministicPreflight, runClaudePreflight } = require('../api/_lib/ai-review');
+const { buildChatPrompt, compactProjectForAi, deterministicPreflight, isReportReviewIntent, runClaudePreflight } = require('../api/_lib/ai-review');
 
 function completeProject(overrides = {}) {
   return {
@@ -133,6 +133,36 @@ test('compact AI payload redacts receipt images and limits OCR text', () => {
   assert.equal(Object.prototype.hasOwnProperty.call(payload.receipts[0], 'imageUrl'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(payload.receipts[0], 'previewUrl'), false);
   assert.equal(payload.receipts[0].ocrText.length, 700);
+});
+
+test('Julie detects report-review chat intent', () => {
+  assert.equal(isReportReviewIntent('Please check for errors'), true);
+  assert.equal(isReportReviewIntent('review this report'), true);
+  assert.equal(isReportReviewIntent('is this ready to send?'), true);
+  assert.equal(isReportReviewIntent('what is wrong with mileage?'), true);
+});
+
+test('Julie report-review chat prompt stays focused on report data, not code', () => {
+  const result = buildChatPrompt(completeProject(), [{ role: 'user', content: 'Please check for errors' }]);
+  const serialized = JSON.stringify(result.prompt);
+
+  assert.equal(result.reportReviewIntent, true);
+  assert.equal(result.prompt.mode, 'report-review');
+  assert.ok(result.prompt.responseFormat.includes('Critical'));
+  assert.ok(serialized.includes('deterministicReview'));
+  assert.ok(serialized.includes('compactProject'));
+  assert.ok(serialized.includes('Do not provide code'));
+  assert.ok(serialized.includes('Expense row'));
+});
+
+test('Julie normal report questions still use current project data', () => {
+  const result = buildChatPrompt(completeProject(), [{ role: 'user', content: 'Why is total due this amount?' }]);
+  const serialized = JSON.stringify(result.prompt);
+
+  assert.equal(result.reportReviewIntent, false);
+  assert.equal(result.prompt.mode, 'report-question');
+  assert.ok(serialized.includes('totals'));
+  assert.equal(result.prompt.compactProject.totals.totalDue, 2827.1);
 });
 
 test('Claude preflight reports setup error when API key is missing', async () => {

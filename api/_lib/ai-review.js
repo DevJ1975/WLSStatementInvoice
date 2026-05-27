@@ -257,8 +257,12 @@ function compactProjectForAi(project, options = {}) {
 
 function aiSystemPrompt() {
   return [
-    'You are the WLS Expense Invoicer business-logic reviewer.',
-    'Your job is to help prepare an accountant-ready expense, mileage, work log, receipt, PDF, and Excel package.',
+    'You are Julie, the WLS Expense Invoicer report assistant.',
+    'Your job is to review the current expense report project: statement, expenses, mileage, work logs, receipts, totals, PDF readiness, and Excel readiness.',
+    'You are not a general coding assistant inside this app.',
+    'Do not provide code snippets, implementation advice, file paths, API route names, database schema advice, or developer instructions unless the user explicitly asks for software development help.',
+    'If the user asks to check for errors, review this report, find issues, or decide whether it is ready to send, focus only on the current report data and deterministic review results.',
+    'When reviewing a report, reference exact row numbers when possible, such as Expense row 1, Mileage row 2, Work log row 3, or receipt references.',
     'Never claim the report is perfect. Say whether it appears ready based on the provided data.',
     'Do not invent records, do not request secrets, and do not suggest automatic edits.',
     'Prioritize: required statement fields, receipt evidence, date consistency, totals, duplicate-looking entries, work-log/mileage alignment, and package readiness.',
@@ -386,30 +390,93 @@ function sanitizeChatMessages(messages) {
     .filter((message) => message.content);
 }
 
-async function runClaudeChat(project, messages = []) {
+function latestUserMessage(messages) {
+  return [...messages].reverse().find((message) => message.role === 'user')?.content || '';
+}
+
+function isReportReviewIntent(text) {
+  const value = String(text || '').toLowerCase();
+  return (
+    /\b(check|find|scan|look|review|audit|inspect)\b.{0,60}\b(error|errors|issue|issues|mistake|mistakes|problem|problems|missing|ready|report|package)\b/.test(value) ||
+    /\b(review|audit|inspect)\b.{0,40}\b(report|expense report|package|statement)\b/.test(value) ||
+    /\b(is|does|can)\b.{0,25}\b(this|it|report|package)\b.{0,40}\b(ready|ok|okay|complete)\b/.test(value) ||
+    /\bready\b.{0,40}\b(send|email|export|download|submit)\b/.test(value) ||
+    /\b(wrong|missing|problem|issue|errors?)\b.{0,40}\b(expense|expenses|receipt|receipts|mileage|work log|statement|total|totals|report)\b/.test(value)
+  );
+}
+
+function buildChatTask(reportReviewIntent) {
+  const baseRules = [
+    'Use only the current compactProject data and deterministicReview results.',
+    'Do not edit records or claim changes were made.',
+    'Do not provide code, implementation steps, file names, API routes, or developer instructions unless the user explicitly asks for software development help.',
+    'If information is missing from the current report payload, say what is missing instead of guessing.',
+  ];
+
+  if (!reportReviewIntent) {
+    return {
+      mode: 'report-question',
+      task: 'Answer questions about this WLS report using the business rules and current project data.',
+      responseRules: [
+        ...baseRules,
+        'Be concise and point to exact rows when possible.',
+        'For totals questions, explain how labor, expenses, and mileage roll into total due.',
+      ],
+    };
+  }
+
+  return {
+    mode: 'report-review',
+    task: 'Review the current WLS expense report for errors, omissions, and export/email readiness.',
+    responseFormat: ['Critical', 'Warnings', 'Suggestions', 'Ready status'],
+    responseRules: [
+      ...baseRules,
+      'Answer as a short checklist using the headings Critical, Warnings, Suggestions, and Ready status.',
+      'Focus on required statement fields, expense receipts, mileage math/routes, work-log dates/status, duplicate-looking rows, totals, and package readiness.',
+      'Reference exact row numbers from compactProject when possible, using labels like Expense row 1, Mileage row 2, Work log row 3, and Receipt row 4.',
+      'If there are no critical issues, say that clearly, then list warnings or suggestions.',
+    ],
+  };
+}
+
+function buildChatPrompt(project, messages = []) {
   const compactProject = compactProjectForAi(project, { exportType: 'chat' });
   const deterministic = deterministicPreflight(project, { exportType: 'chat' });
   const chatMessages = sanitizeChatMessages(messages);
-  const starter =
-    'Answer questions about this WLS report using the business rules and current project data. Be concise, point to exact rows when possible, and do not edit data.';
+  const reportReviewIntent = isReportReviewIntent(latestUserMessage(chatMessages));
+  return {
+    reportReviewIntent,
+    chatMessages,
+    prompt: {
+      ...buildChatTask(reportReviewIntent),
+      deterministicReview: deterministic,
+      compactProject,
+    },
+  };
+}
+
+async function runClaudeChat(project, messages = []) {
+  const { chatMessages, prompt, reportReviewIntent } = buildChatPrompt(project, messages);
   const { text, model, usage } = await callClaude(
     [
       {
         role: 'user',
-        content: JSON.stringify({ task: starter, deterministicReview: deterministic, compactProject }),
+        content: JSON.stringify(prompt),
       },
       ...chatMessages,
     ],
     aiSystemPrompt(),
-    { maxTokens: 1000, temperature: 0.3 }
+    { maxTokens: reportReviewIntent ? 1200 : 1000, temperature: reportReviewIntent ? 0.2 : 0.3 }
   );
   return { message: text, model, usage, checkedAt: new Date().toISOString() };
 }
 
 module.exports = {
+  buildChatPrompt,
   calculateProjectTotals,
   compactProjectForAi,
   deterministicPreflight,
+  isReportReviewIntent,
   runClaudeChat,
   runClaudePreflight,
 };
