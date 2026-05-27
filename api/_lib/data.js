@@ -207,6 +207,7 @@ function projectSummary(project) {
     periodTo: data.report.periodTo || '',
     updatedAt: project.updatedAt || project.createdAt || null,
     createdAt: project.createdAt || null,
+    aiReviews: project.aiReviews || null,
   };
 }
 

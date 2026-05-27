@@ -1,6 +1,16 @@
 :root {
-  color: #17202a;
-  background: #f3f6f8;
+  --wls-red: #c91f2f;
+  --wls-red-dark: #8f1420;
+  --wls-charcoal: #343a3d;
+  --wls-black: #151719;
+  --wls-silver: #d9dde0;
+  --wls-border: #c9cfd3;
+  --wls-surface: #ffffff;
+  --wls-muted: #636a70;
+  --wls-soft: #f7f8f9;
+  --wls-shadow: 0 10px 24px rgb(21 23 25 / 7%);
+  color: var(--wls-black);
+  background: var(--wls-surface);
   color-scheme: light;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -21,6 +31,7 @@ body {
   width: 100%;
   max-width: 100vw;
   margin: 0;
+  background: var(--wls-surface);
   overflow-x: hidden;
 }
 
@@ -90,9 +101,45 @@ textarea {
   color: #17202a;
 }
 
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #c91f2f;
+  box-shadow: 0 0 0 3px rgb(201 31 47 / 15%);
+  outline: none;
+}
+
 textarea {
   min-height: 84px;
   resize: vertical;
+}
+
+.field-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-label,
+.field-group > span:first-child {
+  color: #4b5a60;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.field-group:focus-within .field-label,
+.field-group:focus-within > span:first-child {
+  color: #c91f2f;
+}
+
+.field-hint {
+  color: #627078;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
 }
 
 main {
@@ -100,6 +147,7 @@ main {
   max-width: 100vw;
   overflow-x: clip;
   min-height: 100vh;
+  background: var(--wls-surface);
   padding-bottom: env(safe-area-inset-bottom);
 }
 
@@ -717,6 +765,48 @@ h3 {
   gap: 14px;
 }
 
+.ai-review-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.ai-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.ai-review-grid section {
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.ai-review-grid h3,
+.ai-review-grid p,
+.ai-review-grid ul {
+  margin: 0;
+}
+
+.ai-review-grid ul {
+  display: grid;
+  gap: 6px;
+  padding-left: 18px;
+}
+
+.ai-review-grid li {
+  color: #4b5a60;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .quick-entry-actions,
 .quick-route-actions {
   display: grid;
@@ -752,6 +842,85 @@ h3 {
 
 .review-checklist li.warning {
   color: #6b4a00;
+}
+
+.ai-chat-drawer {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 60;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  width: min(440px, calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  border: 1px solid #c7d2d8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 18px 48px rgb(23 32 42 / 22%);
+}
+
+.ai-chat-drawer header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+  border-bottom: 1px solid #d8e0e4;
+  background: #f4f7f8;
+}
+
+.ai-chat-drawer header div {
+  display: grid;
+  gap: 4px;
+}
+
+.ai-chat-drawer header span {
+  color: #627078;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
+}
+
+.ai-chat-messages p {
+  max-width: 88%;
+  margin: 0;
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  padding: 10px;
+  color: #17202a;
+  background: #f7f9fa;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.ai-chat-messages .user {
+  align-self: flex-end;
+  border-color: #4b5a60;
+  color: white;
+  background: #4b5a60;
+}
+
+.ai-chat-form {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid #d8e0e4;
+}
+
+.ai-chat-form textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
 }
 
 .print-view,
@@ -1204,15 +1373,16 @@ h3 {
 .labor-entry {
   display: grid;
   gap: 10px;
-  border: 1px solid #d8e0e4;
+  border: 1px solid #d3d8dc;
+  border-left: 4px solid #c91f2f;
   border-radius: 8px;
   padding: 12px;
-  background: #f8fafb;
+  background: linear-gradient(180deg, #fff, #f8fafb);
 }
 
 .labor-entry h3 {
   margin: 0;
-  color: #4b5a60;
+  color: #17202a;
 }
 
 .save-confirmation {
@@ -2082,6 +2252,280 @@ h3 {
   button {
     min-height: 40px;
   }
+}
+
+/* WLS logo-based platform theme */
+button {
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+}
+
+button:not(:disabled):hover,
+button:not(:disabled):focus-visible {
+  background: var(--wls-black);
+  box-shadow: inset 0 -3px 0 var(--wls-red);
+}
+
+button.secondary {
+  border-color: var(--wls-border);
+  background: var(--wls-surface);
+  color: var(--wls-charcoal);
+}
+
+button.secondary:not(:disabled):hover,
+button.secondary:not(:disabled):focus-visible {
+  border-color: var(--wls-red);
+  background: var(--wls-surface);
+  color: var(--wls-black);
+}
+
+button.icon {
+  border-color: #e2b3b9;
+  background: #fff7f8;
+  color: var(--wls-red-dark);
+}
+
+button.danger {
+  border-color: #cf8790;
+  background: #fff7f8;
+  color: var(--wls-red-dark);
+}
+
+button.danger:not(:disabled):hover,
+button.danger:not(:disabled):focus-visible {
+  background: var(--wls-red-dark);
+  color: white;
+}
+
+input,
+select,
+textarea {
+  border-color: var(--wls-border);
+  background: var(--wls-surface);
+  color: var(--wls-black);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #80878d;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--wls-red);
+  box-shadow: 0 0 0 3px rgb(201 31 47 / 15%);
+}
+
+form,
+.dashboard-grid article,
+.dashboard-panel,
+.admin-panel,
+.archive-list article,
+.statement-sheet,
+.sheet-panel,
+.print-toolbar,
+.quickbooks-panel,
+.gps-panel,
+.receipt-grid article,
+.member-list article,
+.ai-review-grid section,
+.ai-chat-drawer,
+.calculator-panel {
+  border-color: var(--wls-silver);
+  background: var(--wls-surface);
+  box-shadow: var(--wls-shadow);
+}
+
+form,
+.dashboard-panel,
+.sheet-panel,
+.admin-panel,
+.quickbooks-panel,
+.gps-panel {
+  border-top: 3px solid var(--wls-red);
+}
+
+.app-header {
+  border-bottom: 1px solid var(--wls-silver);
+  background: var(--wls-surface);
+}
+
+.app-header h1,
+h1,
+h2,
+h3 {
+  color: var(--wls-black);
+}
+
+.eyebrow,
+.field-group:focus-within .field-label,
+.field-group:focus-within > span:first-child {
+  color: var(--wls-red);
+}
+
+.field-label,
+.field-group > span:first-child,
+.dashboard-grid span,
+.mode-pill,
+.muted,
+.member-list p {
+  color: var(--wls-muted);
+}
+
+.clock-card,
+.weather-card,
+.mode-pill,
+.save-confirmation,
+.period-row span,
+.calculator-display,
+.calculator-keys button,
+.segmented-control,
+.address-suggestions,
+.saved-location-list article,
+.mileage-draft-list label,
+.summary-box,
+.route-map,
+.print-receipt-card {
+  border-color: var(--wls-silver);
+  background: var(--wls-surface);
+}
+
+.tabs {
+  border-bottom: 1px solid var(--wls-silver);
+}
+
+.tabs button {
+  border-color: var(--wls-border);
+  background: var(--wls-surface);
+  color: var(--wls-charcoal);
+}
+
+.tabs button.active {
+  border-color: var(--wls-black);
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+  box-shadow: inset 0 -4px 0 var(--wls-red);
+}
+
+.segmented-control button {
+  background: var(--wls-surface);
+  color: var(--wls-charcoal);
+}
+
+.segmented-control button.active {
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+  box-shadow: inset 0 -3px 0 var(--wls-red);
+}
+
+.archive-list article.selected {
+  border-color: var(--wls-red);
+  box-shadow: 0 0 0 3px rgb(201 31 47 / 14%);
+}
+
+.labor-entry {
+  border-color: var(--wls-silver);
+  border-left-color: var(--wls-red);
+  background: var(--wls-surface);
+}
+
+.sheet-title-row span,
+.sheet-topline span,
+.summary-box span {
+  color: var(--wls-muted);
+}
+
+.sheet-title-row strong,
+.sheet-topline strong,
+.dashboard-grid strong,
+.summary-box strong {
+  color: var(--wls-black);
+}
+
+.sheet-table th {
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+}
+
+.sheet-table th:first-child {
+  box-shadow: inset 4px 0 0 var(--wls-red);
+}
+
+.sheet-table td {
+  border-color: var(--wls-silver);
+}
+
+.sheet-table tbody tr:nth-child(even) td {
+  background: var(--wls-soft);
+}
+
+.sheet-table tfoot td,
+.statement-table tfoot td {
+  background: #f1f2f3;
+  color: var(--wls-black);
+}
+
+.calculator-keys .operator,
+.calculator-keys .equals,
+.route-map-controls button {
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+}
+
+.route-thumbnail-button {
+  border-color: var(--wls-border);
+  background:
+    linear-gradient(90deg, #edf0f2 1px, transparent 1px),
+    linear-gradient(#edf0f2 1px, transparent 1px),
+    var(--wls-surface);
+  color: var(--wls-red-dark);
+}
+
+.route-thumbnail-button polyline {
+  stroke: var(--wls-red-dark);
+}
+
+.route-thumbnail-button circle {
+  fill: var(--wls-charcoal);
+}
+
+.ai-chat-drawer header,
+.print-page-header,
+.quickbooks-header {
+  border-color: var(--wls-silver);
+  background: var(--wls-surface);
+}
+
+.ai-chat-messages p {
+  border-color: var(--wls-silver);
+  background: var(--wls-surface);
+  color: var(--wls-black);
+}
+
+.ai-chat-messages .user {
+  border-color: var(--wls-charcoal);
+  background: var(--wls-charcoal);
+  color: var(--wls-surface);
+}
+
+.sync-cloud-button,
+button.sync-cloud-button {
+  background: #087f5b;
+}
+
+.status-message,
+.save-confirmation.pending {
+  border-color: #e2d4a7;
+  background: #fff9e7;
+  color: #624a10;
+}
+
+.save-toast.failed,
+.save-confirmation.failed {
+  border-color: #e4c4c8;
+  background: #fff5f5;
+  color: var(--wls-red-dark);
 }
 
 @media print {

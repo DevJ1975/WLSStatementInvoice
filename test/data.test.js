@@ -104,6 +104,7 @@ test('projectSummary and projectPayload expose normalized project fields', () =>
     periodTo: '2026-05-24',
     updatedAt: '2026-05-24T00:00:00.000Z',
     createdAt: '2026-05-01T00:00:00.000Z',
+    aiReviews: null,
   });
 
   const payload = projectPayload(project);

@@ -224,6 +224,17 @@ const state = reactive({
       updatedAt: '',
     },
   },
+  ai: {
+    loading: false,
+    error: '',
+    lastReview: null,
+    warningAcknowledged: false,
+    pendingExportType: '',
+    chatOpen: false,
+    chatInput: '',
+    chatLoading: false,
+    chatMessages: [],
+  },
 });
 
 const routeMapEl = ref(null);
@@ -353,6 +364,19 @@ const workLogCategoryTotals = computed(() =>
   }, {})
 );
 const projectReviewItems = computed(() => buildProjectReviewItems(data.value));
+const aiReviewStatusText = computed(() => {
+  const review = state.ai.lastReview || state.currentProject?.aiReviews;
+  if (state.ai.loading) return 'AI reviewing...';
+  if (!review) return 'Not reviewed';
+  const status = review.status || review.lastStatus;
+  if (status === 'fail') return 'Critical fixes needed';
+  if (status === 'warning') return 'Warnings to review';
+  if (status === 'pass') return 'AI reviewed';
+  return 'Not reviewed';
+});
+const aiReviewCritical = computed(() => state.ai.lastReview?.critical || []);
+const aiReviewWarnings = computed(() => state.ai.lastReview?.warnings || []);
+const aiReviewSuggestions = computed(() => state.ai.lastReview?.suggestions || []);
 const receiptDraftMissingFields = computed(() => missingReceiptDraftFields());
 const headerDateText = computed(() => headerDateFormatter.format(state.header.now));
 const headerTimeText = computed(() => headerTimeFormatter.format(state.header.now));
@@ -1355,6 +1379,7 @@ function scheduleAutoSave() {
   clearAutosaveTimer();
   state.lastSaveStatus = 'Autosave pending...';
   state.saveNotice = '';
+  state.ai.warningAcknowledged = false;
   autosaveTimer = setTimeout(() => {
     autosaveTimer = null;
     saveCurrentProject({ autosave: true });
@@ -1505,6 +1530,126 @@ async function saveDeviceDraftToMongo(config = {}) {
 async function saveDetailsToMongo() {
   clearAutosaveTimer();
   await saveCurrentProject({ requireCloud: true, verifyCloud: true });
+}
+
+function aiIssueText(issue) {
+  if (typeof issue === 'string') return issue;
+  return [issue.label, issue.detail].filter(Boolean).join(' - ');
+}
+
+function acknowledgeAiWarnings() {
+  state.ai.warningAcknowledged = true;
+  state.ai.error = '';
+  state.saveNotice = 'AI warnings acknowledged. You can continue the export when ready.';
+}
+
+function openAiChat() {
+  state.ai.chatOpen = true;
+  if (!state.ai.chatMessages.length) {
+    state.ai.chatMessages.push({
+      role: 'assistant',
+      content: 'Ask me what needs to be fixed before you download or email this package.',
+    });
+  }
+}
+
+function closeAiChat() {
+  state.ai.chatOpen = false;
+}
+
+async function runAiPreflight(exportType = 'review', options = {}) {
+  if (!state.currentProject) return null;
+  state.ai.loading = true;
+  state.ai.error = '';
+  if (exportType !== state.ai.pendingExportType) state.ai.warningAcknowledged = false;
+  state.ai.pendingExportType = exportType;
+
+  try {
+    if (options.saveFirst !== false) {
+      clearAutosaveTimer();
+      await saveCurrentProject({ requireCloud: true, verifyCloud: exportType !== 'review' });
+    }
+    if (!isPersistedMongoProject(state.currentProject)) {
+      throw new Error('AI review requires this project to be saved to MongoDB first.');
+    }
+    const payload = await apiJson('/api/ai/preflight', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: state.currentProject.id,
+        exportType,
+      }),
+    });
+    state.ai.lastReview = payload.review;
+    state.currentProject.aiReviews = payload.aiReviews;
+    const index = state.projects.findIndex((project) => project.id === state.currentProject.id);
+    if (index >= 0) state.projects[index] = { ...state.projects[index], aiReviews: payload.aiReviews };
+    saveLocalArchive({ defer: true, updateStatus: false });
+    return payload.review;
+  } catch (error) {
+    state.ai.error = error.message || 'AI review failed.';
+    return null;
+  } finally {
+    state.ai.loading = false;
+  }
+}
+
+async function runDashboardAiReview() {
+  const review = await runAiPreflight('review');
+  if (!review) return;
+  if (review.status === 'pass') state.saveNotice = 'AI review passed. This package appears ready.';
+  if (review.status === 'warning') state.saveNotice = 'AI review found warnings to review.';
+  if (review.status === 'fail') state.saveNotice = 'AI review found critical issues to fix.';
+}
+
+async function ensureAiReadyForExport(exportType) {
+  const review = await runAiPreflight(exportType);
+  if (!review) {
+    state.error = state.ai.error || 'AI review could not be completed.';
+    return false;
+  }
+  if (review.status === 'fail') {
+    state.error = 'AI review found critical issues. Fix them before exporting or printing.';
+    state.tab = 'dashboard';
+    await nextTick();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return false;
+  }
+  if (review.status === 'warning' && !state.ai.warningAcknowledged) {
+    state.error = 'AI review found warnings. Review and acknowledge them before continuing.';
+    state.tab = 'dashboard';
+    await nextTick();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return false;
+  }
+  state.error = '';
+  return true;
+}
+
+async function sendAiChatMessage() {
+  const content = state.ai.chatInput.trim();
+  if (!content || !state.currentProject || state.ai.chatLoading) return;
+  state.ai.chatMessages.push({ role: 'user', content });
+  state.ai.chatInput = '';
+  state.ai.chatLoading = true;
+  state.ai.error = '';
+
+  try {
+    if (!isPersistedMongoProject(state.currentProject)) {
+      await saveCurrentProject({ requireCloud: true, verifyCloud: false });
+    }
+    const payload = await apiJson('/api/ai/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: state.currentProject.id,
+        messages: state.ai.chatMessages.filter((message) => ['user', 'assistant'].includes(message.role)),
+      }),
+    });
+    state.ai.chatMessages.push({ role: 'assistant', content: payload.reply.message });
+  } catch (error) {
+    state.ai.chatMessages.push({ role: 'assistant', content: `I could not reach Claude: ${error.message}` });
+  } finally {
+    state.ai.chatLoading = false;
+  }
 }
 
 async function syncLocalProjectsToCloud() {
@@ -1741,6 +1886,7 @@ function exportQuickBooksExpensesCsv() {
 }
 
 async function exportExcelPackage() {
+  if (!(await ensureAiReadyForExport('excel'))) return;
   const excelModule = await import('exceljs');
   const ExcelJS = excelModule.default || excelModule;
   const workbook = new ExcelJS.Workbook();
@@ -1932,12 +2078,14 @@ function styleExcelCurrencyRow(row, firstColumn, lastColumn) {
   }
 }
 
-function openPrintView() {
+async function openPrintView() {
+  if (!(await ensureAiReadyForExport('print'))) return;
   state.tab = 'print';
   nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
 }
 
 async function printPackage() {
+  if (!(await ensureAiReadyForExport('print'))) return;
   state.tab = 'print';
   await nextTick();
   window.print();
@@ -3939,6 +4087,7 @@ function routeMetrics(row) {
 }
 
 async function exportPdf(includeReceipts = false) {
+  if (!(await ensureAiReadyForExport(includeReceipts ? 'pdf-receipts' : 'pdf'))) return;
   const { jsPDF } = await import('jspdf');
   const autoTableModule = await import('jspdf-autotable');
   const autoTable = autoTableModule.default;
@@ -4075,6 +4224,7 @@ function accountingDetailTableRows() {
 }
 
 async function exportDetailedPdf(includeReceipts = false) {
+  if (!(await ensureAiReadyForExport(includeReceipts ? 'detailed-pdf-receipts' : 'detailed-pdf'))) return;
   const { jsPDF } = await import('jspdf');
   const autoTableModule = await import('jspdf-autotable');
   const autoTable = autoTableModule.default;
@@ -4731,19 +4881,40 @@ onBeforeUnmount(() => {
       <form v-if="state.auth.setupRequired" @submit.prevent="setupFirstAdmin">
         <img :src="logoUrl" alt="Workplace Learning System" />
         <h2>Create admin account</h2>
-        <input v-model="state.auth.setup.name" autocomplete="name" placeholder="Admin name" />
-        <input v-model="state.auth.setup.email" type="email" autocomplete="email" placeholder="Email" spellcheck="false" />
-        <input v-model="state.auth.setup.phone" autocomplete="tel" placeholder="Phone" spellcheck="false" />
-        <input v-model="state.auth.setup.accountNumber" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="Optional account #" spellcheck="false" />
-        <input v-model="state.auth.setup.pin" inputmode="numeric" type="password" autocomplete="new-password" placeholder="PIN" spellcheck="false" />
+        <label class="field-group">
+          <span class="field-label">Admin Name</span>
+          <input v-model="state.auth.setup.name" autocomplete="name" placeholder="Jamil Jones" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Admin Email</span>
+          <input v-model="state.auth.setup.email" type="email" autocomplete="email" placeholder="name@example.com" spellcheck="false" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Admin Phone</span>
+          <input v-model="state.auth.setup.phone" autocomplete="tel" placeholder="702-555-0100" spellcheck="false" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Optional Account #</span>
+          <input v-model="state.auth.setup.accountNumber" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="1234" spellcheck="false" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">PIN</span>
+          <input v-model="state.auth.setup.pin" inputmode="numeric" type="password" autocomplete="new-password" placeholder="4+ digits" spellcheck="false" />
+        </label>
         <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
         <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Creating...' : 'Create admin' }}</button>
       </form>
       <form v-else @submit.prevent="loginWithAccount">
         <img :src="logoUrl" alt="Workplace Learning System" />
         <h2>Account login</h2>
-        <input v-model="state.auth.accountNumber" inputmode="numeric" maxlength="4" autocomplete="username" placeholder="Account #" spellcheck="false" />
-        <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="PIN" spellcheck="false" />
+        <label class="field-group">
+          <span class="field-label">Account #</span>
+          <input v-model="state.auth.accountNumber" inputmode="numeric" maxlength="4" autocomplete="username" placeholder="1234" spellcheck="false" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">PIN</span>
+          <input v-model="state.auth.pinInput" inputmode="numeric" type="password" autocomplete="current-password" placeholder="Enter PIN" spellcheck="false" />
+        </label>
         <p v-if="state.auth.loginError" class="status-message gps-message">{{ state.auth.loginError }}</p>
         <button type="submit" :disabled="state.auth.loginLoading">{{ state.auth.loginLoading ? 'Signing in...' : 'Sign in' }}</button>
       </form>
@@ -4782,6 +4953,7 @@ onBeforeUnmount(() => {
           </span>
         </button>
         <span class="mode-pill">#{{ state.auth.member?.accountNumber }} {{ state.auth.member?.role }}</span>
+        <button class="secondary" type="button" @click="openAiChat">Ask AI</button>
         <button class="secondary" type="button" @click="logoutAccount">Logout</button>
         <button class="secondary" type="button" @click="openPrintView">Print View</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
@@ -4827,13 +4999,41 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
+    <aside v-if="state.ai.chatOpen" class="ai-chat-drawer" role="dialog" aria-label="AI report assistant">
+      <header>
+        <div>
+          <strong>AI report assistant</strong>
+          <span>Claude reviews only. You approve all changes.</span>
+        </div>
+        <button class="secondary" type="button" @click="closeAiChat">Close</button>
+      </header>
+      <div class="ai-chat-messages">
+        <p
+          v-for="(message, index) in state.ai.chatMessages"
+          :key="`${message.role}-${index}`"
+          :class="message.role"
+        >
+          {{ message.content }}
+        </p>
+      </div>
+      <form class="ai-chat-form" @submit.prevent="sendAiChatMessage">
+        <label class="field-group">
+          <span class="field-label">Ask AI About This Report</span>
+          <textarea v-model="state.ai.chatInput" rows="3" placeholder="Ask what needs fixing before I email this package..." spellcheck="true"></textarea>
+        </label>
+        <button type="submit" :disabled="state.ai.chatLoading || !state.ai.chatInput.trim()">
+          {{ state.ai.chatLoading ? 'Asking...' : 'Ask AI' }}
+        </button>
+      </form>
+    </aside>
+
     <nav class="tabs" aria-label="Main views">
       <button
         v-for="[key, label] in visibleTabs"
         :key="key"
         :class="{ active: state.tab === key }"
         type="button"
-        @click="state.tab = key"
+        @click="key === 'print' ? openPrintView() : (state.tab = key)"
       >
         {{ label }}
       </button>
@@ -4868,6 +5068,50 @@ onBeforeUnmount(() => {
           <p><span>Total Due</span><strong>{{ money.format(totalDue) }}</strong></p>
           <p><span>Last Saved</span><strong>{{ state.lastSavedAt ? formatDateTime(state.lastSavedAt) : 'Not saved' }}</strong></p>
           <p><span>Receipts Queued</span><strong>{{ state.receiptQueue.length }}</strong></p>
+        </div>
+      </div>
+
+      <div class="dashboard-panel ai-review-panel">
+        <div class="sheet-title-row"><span>AI Review</span><strong>{{ aiReviewStatusText }}</strong></div>
+        <div class="ai-review-actions">
+          <button type="button" :disabled="state.ai.loading" @click="runDashboardAiReview">
+            {{ state.ai.loading ? 'Reviewing...' : 'Run AI Review' }}
+          </button>
+          <button class="secondary" type="button" @click="openAiChat">Ask AI</button>
+          <button
+            v-if="aiReviewWarnings.length && !aiReviewCritical.length && !state.ai.warningAcknowledged"
+            class="secondary"
+            type="button"
+            @click="acknowledgeAiWarnings"
+          >
+            Acknowledge warnings
+          </button>
+        </div>
+        <p v-if="state.ai.error" class="status-message gps-message">{{ state.ai.error }}</p>
+        <p v-else-if="state.ai.lastReview?.summary" class="muted">{{ state.ai.lastReview.summary }}</p>
+        <p v-else class="muted">Run AI review before downloading, printing, or preparing files to email.</p>
+        <div v-if="state.ai.lastReview" class="ai-review-grid">
+          <section>
+            <h3>Critical</h3>
+            <p v-if="!aiReviewCritical.length" class="muted">None found.</p>
+            <ul v-else>
+              <li v-for="(item, index) in aiReviewCritical" :key="`critical-${index}`">{{ aiIssueText(item) }}</li>
+            </ul>
+          </section>
+          <section>
+            <h3>Warnings</h3>
+            <p v-if="!aiReviewWarnings.length" class="muted">None found.</p>
+            <ul v-else>
+              <li v-for="(item, index) in aiReviewWarnings.slice(0, 8)" :key="`warning-${index}`">{{ aiIssueText(item) }}</li>
+            </ul>
+          </section>
+          <section>
+            <h3>Suggestions</h3>
+            <p v-if="!aiReviewSuggestions.length" class="muted">None right now.</p>
+            <ul v-else>
+              <li v-for="(item, index) in aiReviewSuggestions.slice(0, 6)" :key="`suggestion-${index}`">{{ aiIssueText(item) }}</li>
+            </ul>
+          </section>
         </div>
       </div>
 
@@ -5070,16 +5314,31 @@ onBeforeUnmount(() => {
 
     <section v-else-if="isAdmin && state.tab === 'admin'" class="admin-view">
       <div class="admin-grid">
-        <form class="admin-panel" @submit.prevent="createMember">
-          <h2>Create member</h2>
-          <input v-model="state.admin.form.name" required placeholder="Member name" />
-          <input v-model="state.admin.form.email" type="email" placeholder="Email" spellcheck="false" />
-          <input v-model="state.admin.form.phone" placeholder="Phone" spellcheck="false" />
-          <select v-model="state.admin.form.role">
+      <form class="admin-panel" @submit.prevent="createMember">
+        <h2>Create member</h2>
+          <label class="field-group">
+            <span class="field-label">Member Name</span>
+            <input v-model="state.admin.form.name" required placeholder="Member name" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Email</span>
+            <input v-model="state.admin.form.email" type="email" placeholder="name@example.com" spellcheck="false" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Phone</span>
+            <input v-model="state.admin.form.phone" placeholder="702-555-0100" spellcheck="false" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Role</span>
+            <select v-model="state.admin.form.role">
             <option value="member">Member</option>
             <option value="admin">Admin</option>
-          </select>
-          <input v-model="state.admin.form.pin" required inputmode="numeric" type="password" minlength="4" placeholder="Temporary PIN" spellcheck="false" />
+            </select>
+          </label>
+          <label class="field-group">
+            <span class="field-label">Temporary PIN</span>
+            <input v-model="state.admin.form.pin" required inputmode="numeric" type="password" minlength="4" placeholder="4+ digits" spellcheck="false" />
+          </label>
           <button type="submit">Create account</button>
         </form>
 
@@ -5097,10 +5356,13 @@ onBeforeUnmount(() => {
                 <p>#{{ member.accountNumber }} | {{ member.role }} | {{ member.status }}</p>
                 <p>{{ [member.email, member.phone].filter(Boolean).join(' | ') }}</p>
               </div>
-              <select :value="member.role" @change="patchMember(member, { role: $event.target.value })">
+              <label class="field-group">
+                <span class="field-label">Member Role</span>
+                <select :value="member.role" @change="patchMember(member, { role: $event.target.value })">
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>
-              </select>
+                </select>
+              </label>
               <button class="secondary" type="button" @click="resetMemberPin(member)">Reset PIN</button>
               <button class="secondary" type="button" @click="toggleMemberStatus(member)">{{ member.status === 'active' ? 'Disable' : 'Reactivate' }}</button>
             </article>
@@ -5118,7 +5380,7 @@ onBeforeUnmount(() => {
         </div>
         <button class="secondary" type="button" @click="exportJsonBackup">Export JSON Backup</button>
         <button class="secondary" type="button" @click="openBackupImport">Import Backup</button>
-        <input ref="backupFileInput" class="hidden-file" type="file" accept="application/json" @change="importJsonBackup" />
+        <input ref="backupFileInput" class="hidden-file" type="file" accept="application/json" aria-label="Import JSON backup file" @change="importJsonBackup" />
         <button type="button" @click="createProject()">New project</button>
       </div>
       <p v-if="state.recoveryStatus" class="sync-status">{{ state.recoveryStatus }}</p>
@@ -5130,12 +5392,15 @@ onBeforeUnmount(() => {
             <p>{{ project.status }} <span v-if="project.periodFrom">| {{ project.periodFrom }} to {{ project.periodTo }}</span></p>
             <p v-if="isAdmin">Assigned: {{ memberName(project.memberId) }}</p>
           </div>
-          <select v-if="isAdmin" :value="project.memberId || ''" @change="assignProjectMember(project, $event.target.value)">
+          <label v-if="isAdmin" class="field-group">
+            <span class="field-label">Assigned Member</span>
+            <select :value="project.memberId || ''" @change="assignProjectMember(project, $event.target.value)">
             <option value="">Unassigned</option>
             <option v-for="member in state.admin.members.filter((item) => item.status === 'active')" :key="member.id" :value="member.id">
               #{{ member.accountNumber }} {{ member.name || 'Member' }}
             </option>
-          </select>
+            </select>
+          </label>
           <button v-if="project.status !== 'deleted'" class="secondary" type="button" @click="openProject(project.id)">Open</button>
           <button v-if="project.status !== 'deleted'" class="secondary" type="button" @click="renameProject(project)">Rename</button>
           <button v-if="project.status !== 'archived' && project.status !== 'deleted'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
@@ -5148,58 +5413,148 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'statement'" class="statement-grid">
       <form class="report-form" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" @submit.prevent="saveDetailsToMongo">
         <h2>Report details</h2>
-        <input v-model="meta.clientName" placeholder="Client name" />
+        <label class="field-group">
+          <span class="field-label">Client Name</span>
+          <input v-model="meta.clientName" placeholder="Client name" />
+        </label>
         <div class="inline-fields">
-          <input v-model="meta.jobNumber" placeholder="Job number" spellcheck="false" />
-          <input v-model="meta.poNumber" placeholder="PO number" spellcheck="false" />
+          <label class="field-group">
+            <span class="field-label">Job Number</span>
+            <input v-model="meta.jobNumber" placeholder="Job number" spellcheck="false" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">PO Number</span>
+            <input v-model="meta.poNumber" placeholder="PO number" spellcheck="false" />
+          </label>
         </div>
-        <input v-model="meta.siteName" placeholder="Site / location name" />
-        <input v-model="meta.siteAddress" placeholder="Site address for mileage" />
+        <label class="field-group">
+          <span class="field-label">Site / Location Name</span>
+          <input v-model="meta.siteName" placeholder="Site / location name" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Site Address for Mileage</span>
+          <input v-model="meta.siteAddress" placeholder="Site address" />
+        </label>
         <div class="inline-fields">
-          <input v-model="meta.invoiceNumber" placeholder="Invoice number" spellcheck="false" />
-          <input v-model="meta.billingContact" placeholder="Billing contact" />
+          <label class="field-group">
+            <span class="field-label">Invoice Number</span>
+            <input v-model="meta.invoiceNumber" placeholder="Invoice number" spellcheck="false" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Billing Contact</span>
+            <input v-model="meta.billingContact" placeholder="Billing contact" />
+          </label>
         </div>
-        <input v-model="meta.billingEmail" type="email" placeholder="Billing email" spellcheck="false" autocapitalize="off" />
-        <input v-model="report.employeeName" placeholder="Employee name" />
-        <input v-model="report.address" placeholder="Address" />
+        <label class="field-group">
+          <span class="field-label">Billing Email</span>
+          <input v-model="meta.billingEmail" type="email" placeholder="billing@example.com" spellcheck="false" autocapitalize="off" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Employee Name</span>
+          <input v-model="report.employeeName" placeholder="Employee name" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Employee Address</span>
+          <input v-model="report.address" placeholder="Street, city, state, ZIP" />
+        </label>
         <div class="inline-fields">
-          <input v-model="report.employeeId" placeholder="Account #" spellcheck="false" :readonly="accountFieldReadonly" />
-          <input v-model="report.reportNo" placeholder="Report no." spellcheck="false" />
+          <label class="field-group">
+            <span class="field-label">Account #</span>
+            <input v-model="report.employeeId" placeholder="Account #" spellcheck="false" :readonly="accountFieldReadonly" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Report No.</span>
+            <input v-model="report.reportNo" placeholder="Report no." spellcheck="false" />
+          </label>
         </div>
         <div class="inline-fields">
-          <input v-model="report.phone" placeholder="Phone" spellcheck="false" />
-          <input v-model="report.email" type="email" placeholder="Email" spellcheck="false" autocapitalize="off" />
+          <label class="field-group">
+            <span class="field-label">Phone</span>
+            <input v-model="report.phone" placeholder="702-555-0100" spellcheck="false" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Email</span>
+            <input v-model="report.email" type="email" placeholder="name@example.com" spellcheck="false" autocapitalize="off" />
+          </label>
         </div>
         <div class="inline-fields">
-          <input v-model="report.periodFrom" type="date" />
-          <input v-model="report.periodTo" type="date" />
-          <input v-model="report.reportDate" type="date" />
+          <label class="field-group">
+            <span class="field-label">Report Period Start</span>
+            <input v-model="report.periodFrom" type="date" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Report Period End</span>
+            <input v-model="report.periodTo" type="date" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Statement Date</span>
+            <input v-model="report.reportDate" type="date" />
+          </label>
         </div>
-        <input v-model="report.engagement" placeholder="Engagement" />
-        <textarea v-model="meta.notes" placeholder="Project notes"></textarea>
-        <input v-model="report.laborTitle" placeholder="Labor title" />
+        <label class="field-group">
+          <span class="field-label">Engagement</span>
+          <input v-model="report.engagement" placeholder="Engagement" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Project Notes</span>
+          <textarea v-model="meta.notes" placeholder="Project notes"></textarea>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Labor Title</span>
+          <input v-model="report.laborTitle" placeholder="Labor title" />
+        </label>
         <div class="labor-entry">
           <h3>Onsite Work</h3>
           <div class="inline-fields">
-            <input v-model="report.onsiteFrom" type="date" @change="handleLaborDateChange('onsite')" />
-            <input v-model="report.onsiteTo" type="date" @change="handleLaborDateChange('onsite')" />
+            <label class="field-group">
+              <span class="field-label">Onsite Start</span>
+              <input v-model="report.onsiteFrom" type="date" @change="handleLaborDateChange('onsite')" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Onsite End</span>
+              <input v-model="report.onsiteTo" type="date" @change="handleLaborDateChange('onsite')" />
+            </label>
           </div>
-          <input v-model="report.onsiteDescription" placeholder="Onsite work description" />
+          <label class="field-group">
+            <span class="field-label">Onsite Description</span>
+            <input v-model="report.onsiteDescription" placeholder="Onsite work description" />
+          </label>
           <div class="inline-fields compact">
-            <input v-model.number="report.onsiteDays" type="number" min="0" step="0.5" placeholder="Onsite days" />
-            <input v-model.number="report.onsiteRate" type="number" min="0" step="0.01" placeholder="Onsite daily rate" />
+            <label class="field-group">
+              <span class="field-label">Onsite Days</span>
+              <input v-model.number="report.onsiteDays" type="number" min="0" step="0.5" placeholder="0" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Onsite Daily Rate</span>
+              <input v-model.number="report.onsiteRate" type="number" min="0" step="0.01" placeholder="0.00" />
+            </label>
           </div>
         </div>
         <div class="labor-entry">
           <h3>Remote Work</h3>
           <div class="inline-fields">
-            <input v-model="report.remoteFrom" type="date" @change="handleLaborDateChange('remote')" />
-            <input v-model="report.remoteTo" type="date" @change="handleLaborDateChange('remote')" />
+            <label class="field-group">
+              <span class="field-label">Remote Start</span>
+              <input v-model="report.remoteFrom" type="date" @change="handleLaborDateChange('remote')" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Remote End</span>
+              <input v-model="report.remoteTo" type="date" @change="handleLaborDateChange('remote')" />
+            </label>
           </div>
-          <input v-model="report.remoteDescription" placeholder="Remote work description" />
+          <label class="field-group">
+            <span class="field-label">Remote Description</span>
+            <input v-model="report.remoteDescription" placeholder="Remote work description" />
+          </label>
           <div class="inline-fields compact">
-            <input v-model.number="report.remoteDays" type="number" min="0" step="0.5" placeholder="Remote days" />
-            <input v-model.number="report.remoteRate" type="number" min="0" step="0.01" placeholder="Remote daily rate" />
+            <label class="field-group">
+              <span class="field-label">Remote Days</span>
+              <input v-model.number="report.remoteDays" type="number" min="0" step="0.5" placeholder="0" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Remote Daily Rate</span>
+              <input v-model.number="report.remoteRate" type="number" min="0" step="0.01" placeholder="0.00" />
+            </label>
           </div>
         </div>
         <p class="save-confirmation" :class="{ cloud: ['Saved successfully', 'Autosaved', 'Saved locally', 'Autosaved locally'].includes(state.lastSaveStatus), pending: ['Autosave pending...', 'Autosaving...'].includes(state.lastSaveStatus), failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">
@@ -5260,13 +5615,28 @@ onBeforeUnmount(() => {
             {{ editingLabel('expense') }}
             <button class="link-button" type="button" @click="cancelExpenseEdit">Cancel edit</button>
           </p>
-          <input v-model="expenseForm.date" type="date" required />
-          <input v-model="expenseForm.vendor" placeholder="Vendor" required />
-          <input v-model="expenseForm.description" placeholder="Description" required />
-          <select v-model="expenseForm.category">
-            <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
-          </select>
-          <input v-model="expenseForm.amount" type="number" min="0" step="0.01" placeholder="Amount" required />
+          <label class="field-group">
+            <span class="field-label">Expense Date</span>
+            <input v-model="expenseForm.date" type="date" required />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Vendor</span>
+            <input v-model="expenseForm.vendor" placeholder="Vendor" required />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Description</span>
+            <input v-model="expenseForm.description" placeholder="Description" required />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Expense Category</span>
+            <select v-model="expenseForm.category">
+              <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
+            </select>
+          </label>
+          <label class="field-group">
+            <span class="field-label">Amount</span>
+            <input v-model="expenseForm.amount" type="number" min="0" step="0.01" placeholder="0.00" required />
+          </label>
           <button type="submit">{{ state.editing.expenseId ? 'Save changes' : 'Add expense' }}</button>
         </form>
 
@@ -5276,18 +5646,40 @@ onBeforeUnmount(() => {
             <strong>{{ state.receiptQueue.length }} receipt{{ state.receiptQueue.length === 1 ? '' : 's' }} saved locally</strong>
             <span>They will be included in the device draft backup until synced.</span>
           </div>
-          <input ref="receiptFileInput" type="file" accept="image/*" capture="environment" spellcheck="false" @change="handleReceiptFile" />
+          <label class="field-group">
+            <span class="field-label">Receipt Photo / Upload</span>
+            <input ref="receiptFileInput" type="file" accept="image/*" capture="environment" spellcheck="false" aria-label="Receipt photo or image upload" @change="handleReceiptFile" />
+            <span class="field-hint">Take a photo on mobile or upload an image.</span>
+          </label>
           <p v-if="state.receiptOcrRunning" class="muted">Reading receipt...</p>
           <p v-if="receiptCompressionText()" class="compression-note">{{ receiptCompressionText() }}</p>
           <img v-if="state.receiptDraft.previewUrl" class="receipt-preview" :src="state.receiptDraft.previewUrl" alt="Receipt preview" />
-          <input v-model="state.receiptDraft.vendor" placeholder="Vendor" />
-          <input v-model="state.receiptDraft.date" type="date" />
-          <select v-model="state.receiptDraft.category">
-            <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
-          </select>
-          <input v-model="state.receiptDraft.amount" type="number" min="0" step="0.01" placeholder="Amount" />
-          <input v-model="state.receiptDraft.paymentMethod" placeholder="Payment method" />
-          <textarea v-model="state.receiptDraft.notes" placeholder="Notes"></textarea>
+          <label class="field-group">
+            <span class="field-label">Receipt Vendor</span>
+            <input v-model="state.receiptDraft.vendor" placeholder="Vendor" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Receipt Date</span>
+            <input v-model="state.receiptDraft.date" type="date" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Receipt Category</span>
+            <select v-model="state.receiptDraft.category">
+              <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
+            </select>
+          </label>
+          <label class="field-group">
+            <span class="field-label">Receipt Amount</span>
+            <input v-model="state.receiptDraft.amount" type="number" min="0" step="0.01" placeholder="0.00" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Payment Method</span>
+            <input v-model="state.receiptDraft.paymentMethod" placeholder="Payment method" />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Receipt Notes</span>
+            <textarea v-model="state.receiptDraft.notes" placeholder="Notes"></textarea>
+          </label>
           <p v-if="state.receiptDraft.imageBlob && receiptDraftMissingFields.length" class="status-message gps-message">
             Missing {{ receiptDraftMissingFields.join(', ') }} before saving.
           </p>
@@ -5367,30 +5759,42 @@ onBeforeUnmount(() => {
             <button class="secondary" type="button" @click="repeatLastMileageRoute">Repeat last route</button>
             <button class="secondary" type="button" @click="addRoundTripMileage">Round trip</button>
           </div>
-          <input v-model="mileageForm.date" type="date" required />
+          <label class="field-group">
+            <span class="field-label">Mileage Date</span>
+            <input v-model="mileageForm.date" type="date" required />
+          </label>
           <div class="inline-fields">
-            <select v-model="mileageForm.fromSavedLocationId" @change="applySavedLocationToMileage('from', mileageForm.fromSavedLocationId)">
-              <option value="">From saved location</option>
-              <option v-for="location in savedMileageLocations" :key="`from-location-${location.id}`" :value="location.id">
-                {{ location.label }} ({{ location.type }})
-              </option>
-            </select>
-            <select v-model="mileageForm.toSavedLocationId" @change="applySavedLocationToMileage('to', mileageForm.toSavedLocationId)">
-              <option value="">To saved location</option>
-              <option v-for="location in savedMileageLocations" :key="`to-location-${location.id}`" :value="location.id">
-                {{ location.label }} ({{ location.type }})
-              </option>
-            </select>
+            <label class="field-group">
+              <span class="field-label">From Saved Location</span>
+              <select v-model="mileageForm.fromSavedLocationId" @change="applySavedLocationToMileage('from', mileageForm.fromSavedLocationId)">
+                <option value="">From saved location</option>
+                <option v-for="location in savedMileageLocations" :key="`from-location-${location.id}`" :value="location.id">
+                  {{ location.label }} ({{ location.type }})
+                </option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span class="field-label">To Saved Location</span>
+              <select v-model="mileageForm.toSavedLocationId" @change="applySavedLocationToMileage('to', mileageForm.toSavedLocationId)">
+                <option value="">To saved location</option>
+                <option v-for="location in savedMileageLocations" :key="`to-location-${location.id}`" :value="location.id">
+                  {{ location.label }} ({{ location.type }})
+                </option>
+              </select>
+            </label>
           </div>
           <div class="address-field">
-            <input
-              v-model="mileageForm.from"
-              autocomplete="off"
-              placeholder="From"
-              required
-              spellcheck="true"
-              @input="handleAddressInput('from')"
-            />
+            <label class="field-group">
+              <span class="field-label">From Address</span>
+              <input
+                v-model="mileageForm.from"
+                autocomplete="off"
+                placeholder="Start address"
+                required
+                spellcheck="true"
+                @input="handleAddressInput('from')"
+              />
+            </label>
             <div v-if="state.places.fromSuggestions.length" class="address-suggestions">
               <button
                 v-for="suggestion in state.places.fromSuggestions"
@@ -5403,14 +5807,17 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="address-field">
-            <input
-              v-model="mileageForm.to"
-              autocomplete="off"
-              placeholder="To"
-              required
-              spellcheck="true"
-              @input="handleAddressInput('to')"
-            />
+            <label class="field-group">
+              <span class="field-label">To Address</span>
+              <input
+                v-model="mileageForm.to"
+                autocomplete="off"
+                placeholder="Destination address"
+                required
+                spellcheck="true"
+                @input="handleAddressInput('to')"
+              />
+            </label>
             <div v-if="state.places.toSuggestions.length" class="address-suggestions">
               <button
                 v-for="suggestion in state.places.toSuggestions"
@@ -5422,10 +5829,19 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
-          <input v-model="mileageForm.purpose" placeholder="Purpose" />
+          <label class="field-group">
+            <span class="field-label">Purpose</span>
+            <input v-model="mileageForm.purpose" placeholder="Purpose" />
+          </label>
           <div class="inline-fields compact">
-            <input v-model="mileageForm.miles" type="number" min="0" step="0.01" placeholder="Miles" required />
-            <input v-model="mileageForm.rate" type="number" min="0" step="0.001" placeholder="Rate" required />
+            <label class="field-group">
+              <span class="field-label">Miles</span>
+              <input v-model="mileageForm.miles" type="number" min="0" step="0.01" placeholder="0.00" required />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Rate</span>
+              <input v-model="mileageForm.rate" type="number" min="0" step="0.001" placeholder="0.725" required />
+            </label>
           </div>
           <p v-if="state.places.loadingField" class="muted">Looking up {{ state.places.loadingField }} address...</p>
           <p v-if="state.places.routeLoading" class="muted">Calculating driving mileage...</p>
@@ -5442,12 +5858,21 @@ onBeforeUnmount(() => {
             <p class="muted">Locations are saved to this account and sync across devices.</p>
           </div>
           <div class="inline-fields compact">
-            <select v-model="state.preferences.draftLocation.type">
-              <option v-for="type in mileageLocationTypes" :key="type" :value="type">{{ type }}</option>
-            </select>
-            <input v-model="state.preferences.draftLocation.label" placeholder="Label" />
+            <label class="field-group">
+              <span class="field-label">Location Type</span>
+              <select v-model="state.preferences.draftLocation.type">
+                <option v-for="type in mileageLocationTypes" :key="type" :value="type">{{ type }}</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span class="field-label">Location Label</span>
+              <input v-model="state.preferences.draftLocation.label" placeholder="Home, Site, Hotel" />
+            </label>
           </div>
-          <input v-model="state.preferences.draftLocation.address" placeholder="Address" />
+          <label class="field-group">
+            <span class="field-label">Location Address</span>
+            <input v-model="state.preferences.draftLocation.address" placeholder="Address" />
+          </label>
           <p v-if="state.preferences.error" class="status-message gps-message">{{ state.preferences.error }}</p>
           <p v-if="state.preferences.status" class="sync-status">{{ state.preferences.status }}</p>
           <button type="button" :disabled="state.preferences.saving" @click="addSavedMileageLocation">
@@ -5606,8 +6031,14 @@ onBeforeUnmount(() => {
           </label>
         </div>
         <div class="quick-worklog-meta">
-          <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
-          <input v-model="workLogForm.location" placeholder="Location" />
+          <label class="field-group">
+            <span class="field-label">Client / Site</span>
+            <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
+          </label>
+          <label class="field-group">
+            <span class="field-label">Location</span>
+            <input v-model="workLogForm.location" placeholder="Location" />
+          </label>
         </div>
         <p v-if="workLogDateOutsideLaborRanges" class="save-confirmation pending">
           This date is outside the onsite/remote statement ranges. Review the work type before saving.
@@ -5621,8 +6052,14 @@ onBeforeUnmount(() => {
           {{ workLogForm.showDetails ? 'Hide notes' : 'Add note / more details' }}
         </button>
         <div v-if="workLogForm.showDetails" class="quick-worklog-details">
-          <textarea v-model="workLogForm.actions" placeholder="Optional notes, findings, or actions"></textarea>
-          <textarea v-model="workLogForm.summary" placeholder="Optional manual summary override"></textarea>
+          <label class="field-group">
+            <span class="field-label">Notes / Findings / Actions</span>
+            <textarea v-model="workLogForm.actions" placeholder="Optional notes, findings, or actions"></textarea>
+          </label>
+          <label class="field-group">
+            <span class="field-label">Manual Summary Override</span>
+            <textarea v-model="workLogForm.summary" placeholder="Optional manual summary override"></textarea>
+          </label>
         </div>
         <div class="quick-worklog-actions">
           <button type="submit">{{ state.editing.workLogId ? 'Save changes' : 'Add and next day' }}</button>

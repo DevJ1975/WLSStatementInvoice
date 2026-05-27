@@ -34,9 +34,13 @@ ADMIN_NAME=
 ADMIN_PIN=
 ADMIN_ACCOUNT_NUMBER=
 GEOAPIFY_API_KEY=
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
 ```
 
-Do not commit real MongoDB credentials or admin PINs. If `ADMIN_PIN` is not set and no members exist, the app shows a one-time first-admin setup screen. After the first admin exists, members sign in with account number + PIN.
+Do not commit real MongoDB credentials, admin PINs, Geoapify keys, or Anthropic keys. If `ADMIN_PIN` is not set and no members exist, the app shows a one-time first-admin setup screen. After the first admin exists, members sign in with account number + PIN.
+
+The Claude AI review and chat features require `ANTHROPIC_API_KEY`. `ANTHROPIC_MODEL` is optional and can be updated without changing app code.
 
 ## Build
 
