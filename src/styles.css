@@ -838,6 +838,68 @@ h3 {
   min-width: 0;
 }
 
+.compact-category-summary {
+  margin-top: 14px;
+  font-size: 11px;
+}
+
+.compact-category-summary th,
+.compact-category-summary td,
+.work-summary-table th,
+.work-summary-table td,
+.accounting-detail-table th,
+.accounting-detail-table td {
+  padding: 6px 7px;
+}
+
+.accounting-detail-page .table-scroll {
+  margin-top: 10px;
+}
+
+.accounting-detail-table {
+  table-layout: fixed;
+  min-width: 0;
+  font-size: 10px;
+}
+
+.accounting-detail-table th:nth-child(1),
+.accounting-detail-table td:nth-child(1) {
+  width: 8%;
+}
+
+.accounting-detail-table th:nth-child(2),
+.accounting-detail-table td:nth-child(2) {
+  width: 4%;
+  text-align: center;
+}
+
+.accounting-detail-table th:nth-child(3),
+.accounting-detail-table td:nth-child(3) {
+  width: 9%;
+}
+
+.accounting-detail-table th:nth-child(4),
+.accounting-detail-table td:nth-child(4) {
+  width: 20%;
+}
+
+.accounting-detail-table th:nth-child(5),
+.accounting-detail-table td:nth-child(5) {
+  width: 23%;
+}
+
+.accounting-detail-table th:nth-child(8),
+.accounting-detail-table td:nth-child(8),
+.accounting-detail-table th:nth-child(9),
+.accounting-detail-table td:nth-child(9) {
+  text-align: right;
+}
+
+.work-summary-table {
+  margin-top: 12px;
+  font-size: 10px;
+}
+
 .print-receipt-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1965,9 +2027,24 @@ h3 {
     font-size: 9px;
   }
 
+  .accounting-detail-table,
+  .work-summary-table,
+  .compact-category-summary {
+    font-size: 7.5px;
+  }
+
   .print-page .sheet-table th,
   .print-page .sheet-table td {
     padding: 5px 6px;
+  }
+
+  .accounting-detail-table th,
+  .accounting-detail-table td,
+  .work-summary-table th,
+  .work-summary-table td,
+  .compact-category-summary th,
+  .compact-category-summary td {
+    padding: 3px 4px;
   }
 
   .print-receipt-grid {

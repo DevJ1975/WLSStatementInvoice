@@ -340,6 +340,27 @@ const membersById = computed(() => new Map(state.admin.members.map((member) => [
 const currentProjectMember = computed(() => membersById.value.get(state.currentProject?.memberId) || null);
 const accountFieldReadonly = computed(() => state.auth.member?.role === 'member' || Boolean(currentProjectMember.value));
 const printReceiptPages = computed(() => chunkList(data.value.receipts, 4));
+const compactExpenseRows = computed(() =>
+  data.value.expenseRows.map((row, index) => ({
+    ...row,
+    rowNumber: index + 1,
+    receiptReference: receiptReferenceForExpenseRow(row, index),
+  }))
+);
+const compactMileageRows = computed(() =>
+  data.value.mileageRows.map((row, index) => ({
+    ...row,
+    rowNumber: index + 1,
+    amount: Number(row.miles || 0) * Number(row.rate || 0),
+    source:
+      row.trackingMode === 'gps'
+        ? 'GPS'
+        : row.calculationMode === 'address-route'
+          ? 'Auto route'
+          : 'Manual',
+  }))
+);
+const workLogSummaryRows = computed(() => summarizeWorkLogs(data.value.workLogs));
 const savedMileageLocations = computed(() => state.preferences.mileageLocations);
 const selectedMileageDrafts = computed(() => state.mileageDrafts.filter((draft) => draft.selected));
 
@@ -733,6 +754,51 @@ function categoryTotals(rows) {
       .reduce((sum, row) => sum + Number(row.amount || 0), 0);
     return totals;
   }, {});
+}
+
+function receiptForExpenseRow(row) {
+  return data.value.receipts.find((receipt) => receipt.expenseId === row.id || receipt.id === row.receiptId) || null;
+}
+
+function receiptReferenceForExpenseRow(row, index = data.value.expenseRows.findIndex((expense) => expense.id === row.id)) {
+  const receipt = receiptForExpenseRow(row);
+  const rowNumber = index >= 0 ? index + 1 : '';
+  if (receipt) return `Receipt ${rowNumber || receipt.id}`;
+  return row.receiptId ? `Receipt ${row.receiptId}` : 'Missing receipt';
+}
+
+function mileageRateSummary() {
+  const rates = [...new Set(data.value.mileageRows.map((row) => Number(row.rate || 0)).filter(Boolean))];
+  if (!rates.length) return '$0.000';
+  if (rates.length === 1) return `$${mileageRate.format(rates[0])}`;
+  return 'Mixed rates';
+}
+
+function workLogGroupLabel(row) {
+  const raw = row.taskCategory || row.status || 'Work log';
+  if (/remote/i.test(raw)) return 'Remote work';
+  if (/onsite|on-site|site|field/i.test(raw)) return 'Onsite work';
+  return raw;
+}
+
+function summarizeWorkLogs(rows = []) {
+  const groups = new Map();
+  rows.forEach((row) => {
+    const label = workLogGroupLabel(row);
+    const existing = groups.get(label) || { label, dates: [], entries: 0, hours: 0, summary: '' };
+    if (row.date) existing.dates.push(row.date);
+    existing.entries += 1;
+    existing.hours += Number(row.hours || 0);
+    if (!existing.summary && row.summary) existing.summary = row.summary;
+    groups.set(label, existing);
+  });
+  return [...groups.values()].map((group) => {
+    const sortedDates = [...new Set(group.dates)].sort();
+    return {
+      ...group,
+      dateRange: sortedDates.length > 1 ? `${sortedDates[0]} to ${sortedDates[sortedDates.length - 1]}` : sortedDates[0] || '',
+    };
+  });
 }
 
 function loadEntryDefaults() {
@@ -1451,6 +1517,10 @@ function safeFileName(name, fallback = 'export') {
 
 function downloadTextFile(fileName, content, type = 'text/plain') {
   const blob = new Blob([content], { type });
+  downloadBlobFile(fileName, blob);
+}
+
+function downloadBlobFile(fileName, blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -1567,6 +1637,198 @@ function exportQuickBooksInvoiceCsv() {
 
 function exportQuickBooksExpensesCsv() {
   downloadTextFile(`${safeFileName(projectTitle(), 'quickbooks-expenses')}-quickbooks-expenses.csv`, toCsv(quickBooksExpenseRows()), 'text/csv');
+}
+
+async function exportExcelPackage() {
+  const excelModule = await import('exceljs');
+  const ExcelJS = excelModule.default || excelModule;
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'WLS Expense & Invoice Tracker';
+  workbook.created = new Date();
+  workbook.modified = new Date();
+  const logo = await imageToDataUrl(logoUrl).catch(() => '');
+  const logoId = logo ? workbook.addImage({ base64: logo, extension: imageFormatForDataUrl(logo).toLowerCase() === 'png' ? 'png' : 'jpeg' }) : null;
+
+  buildAccountingPackageSheet(workbook, logoId);
+  buildExpenseDetailSheet(workbook);
+  buildMileageDetailSheet(workbook);
+  buildWorkLogSummarySheet(workbook);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadBlobFile(
+    `${safeFileName(projectTitle(), 'accounting-package')}.xlsx`,
+    new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+  );
+}
+
+function buildAccountingPackageSheet(workbook, logoId) {
+  const sheet = workbook.addWorksheet('Accounting Package', {
+    pageSetup: { orientation: 'landscape', paperSize: 1, fitToPage: true, fitToWidth: 1, fitToHeight: 2 },
+    views: [{ state: 'frozen', ySplit: 8 }],
+  });
+  sheet.columns = [
+    { width: 16 },
+    { width: 24 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+  ];
+  if (logoId !== null) sheet.addImage(logoId, 'A1:B4');
+  sheet.mergeCells('C1:H2');
+  sheet.getCell('C1').value = 'Consolidated Statement';
+  sheet.getCell('C1').font = { size: 20, bold: true, color: { argb: 'FF4B5A60' } };
+  sheet.getCell('C1').alignment = { horizontal: 'right', vertical: 'middle' };
+
+  const metaRows = [
+    ['Invoice / Report', meta.value.invoiceNumber || report.value.reportNo || 'Not set', 'Report Date', report.value.reportDate || 'Not set'],
+    ['Employee / Account', `${report.value.employeeName || 'Employee'}${report.value.employeeId ? ` #${report.value.employeeId}` : ''}`, 'Client', meta.value.clientName || 'Not set'],
+    ['Job / PO', [meta.value.jobNumber, meta.value.poNumber].filter(Boolean).join(' / ') || 'Not set', 'Billing Period', formatPeriod() || 'Not set'],
+  ];
+  metaRows.forEach((row, index) => {
+    sheet.getRow(5 + index).values = row;
+  });
+  styleExcelRange(sheet, 5, 7, 1, 4, { border: true });
+  [5, 6, 7].forEach((rowNumber) => {
+    [1, 3].forEach((column) => {
+      sheet.getCell(rowNumber, column).font = { bold: true };
+      sheet.getCell(rowNumber, column).fill = excelFill('EEF2F4');
+    });
+  });
+
+  const summaryStart = 9;
+  sheet.getRow(summaryStart).values = ['Date Range', 'Description', 'Qty / Miles', 'Rate', 'Total'];
+  styleExcelHeaderRow(sheet.getRow(summaryStart));
+  statementLaborRows.value.forEach((row) => {
+    sheet.addRow([row.date, row.description, Number(row.days || 0), Number(row.rate || 0), Number(row.days || 0) * Number(row.rate || 0)]);
+  });
+  sheet.addRow(['', 'Expense category subtotal', '', '', expenseTotal.value]);
+  sheet.addRow(['', `Mileage reimbursement (${number.format(totalMiles.value)} mi)`, totalMiles.value, mileageRateSummary(), mileageTotal.value]);
+  sheet.addRow(['', 'Total reimbursable expenses', '', '', expenseTotal.value + mileageTotal.value]);
+  const totalRow = sheet.addRow(['', '', '', 'TOTAL DUE', totalDue.value]);
+  totalRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  totalRow.fill = excelFill('846268');
+  styleExcelCurrencyColumn(sheet, 4, summaryStart + 1, totalRow.number);
+  styleExcelCurrencyColumn(sheet, 5, summaryStart + 1, totalRow.number);
+  styleExcelRange(sheet, summaryStart, totalRow.number, 1, 5, { border: true });
+
+  const categoryStart = totalRow.number + 3;
+  sheet.getRow(categoryStart).values = ['Category', ...categories, 'Expense Total', 'Mileage Total', 'Total Due'];
+  styleExcelHeaderRow(sheet.getRow(categoryStart));
+  const categoryRow = sheet.addRow(['Totals', ...categories.map((category) => expenseCategoryTotals.value[category] || 0), expenseTotal.value, mileageTotal.value, totalDue.value]);
+  styleExcelCurrencyRow(categoryRow, 2, categoryRow.cellCount);
+  styleExcelRange(sheet, categoryStart, categoryRow.number, 1, categoryRow.cellCount, { border: true });
+}
+
+function buildExpenseDetailSheet(workbook) {
+  const sheet = workbook.addWorksheet('Expense Detail', { views: [{ state: 'frozen', ySplit: 1 }] });
+  sheet.columns = [
+    { header: '#', key: 'rowNumber', width: 8 },
+    { header: 'Date', key: 'date', width: 14 },
+    { header: 'Vendor', key: 'vendor', width: 24 },
+    { header: 'Description', key: 'description', width: 36 },
+    { header: 'Category', key: 'category', width: 16 },
+    { header: 'Receipt Reference', key: 'receiptReference', width: 20 },
+    { header: 'Amount', key: 'amount', width: 14 },
+  ];
+  compactExpenseRows.value.forEach((row) => sheet.addRow({ ...row, amount: Number(row.amount || 0) }));
+  sheet.addRow({});
+  const totalRow = sheet.addRow({ receiptReference: 'Total', amount: expenseTotal.value });
+  totalRow.font = { bold: true };
+  sheet.autoFilter = 'A1:G1';
+  styleExcelTable(sheet, 1, Math.max(1, sheet.rowCount), 1, 7);
+  styleExcelCurrencyColumn(sheet, 7, 2, sheet.rowCount);
+}
+
+function buildMileageDetailSheet(workbook) {
+  const sheet = workbook.addWorksheet('Mileage Detail', { views: [{ state: 'frozen', ySplit: 1 }] });
+  sheet.columns = [
+    { header: '#', key: 'rowNumber', width: 8 },
+    { header: 'Date', key: 'date', width: 14 },
+    { header: 'From', key: 'from', width: 28 },
+    { header: 'To', key: 'to', width: 28 },
+    { header: 'Purpose', key: 'purpose', width: 30 },
+    { header: 'Source', key: 'source', width: 14 },
+    { header: 'Miles', key: 'miles', width: 12 },
+    { header: 'Rate', key: 'rate', width: 12 },
+    { header: 'Amount', key: 'amount', width: 14 },
+  ];
+  compactMileageRows.value.forEach((row) => sheet.addRow({ ...row, miles: Number(row.miles || 0), rate: Number(row.rate || 0), amount: Number(row.amount || 0) }));
+  sheet.addRow({});
+  const totalRow = sheet.addRow({ source: 'Totals', miles: totalMiles.value, amount: mileageTotal.value });
+  totalRow.font = { bold: true };
+  sheet.autoFilter = 'A1:I1';
+  styleExcelTable(sheet, 1, Math.max(1, sheet.rowCount), 1, 9);
+  styleExcelCurrencyColumn(sheet, 8, 2, sheet.rowCount);
+  styleExcelCurrencyColumn(sheet, 9, 2, sheet.rowCount);
+}
+
+function buildWorkLogSummarySheet(workbook) {
+  const sheet = workbook.addWorksheet('Work Log Summary', { views: [{ state: 'frozen', ySplit: 1 }] });
+  sheet.columns = [
+    { header: 'Work Type', key: 'label', width: 22 },
+    { header: 'Date Range', key: 'dateRange', width: 24 },
+    { header: 'Entries', key: 'entries', width: 12 },
+    { header: 'Hours', key: 'hours', width: 12 },
+    { header: 'Representative Summary', key: 'summary', width: 52 },
+  ];
+  (workLogSummaryRows.value.length ? workLogSummaryRows.value : [{ label: 'No work log rows', dateRange: '', entries: 0, hours: 0, summary: '' }]).forEach((row) => sheet.addRow(row));
+  sheet.autoFilter = 'A1:E1';
+  styleExcelTable(sheet, 1, Math.max(1, sheet.rowCount), 1, 5);
+}
+
+function excelFill(hex) {
+  return { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${hex}` } };
+}
+
+function styleExcelHeaderRow(row) {
+  row.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  row.fill = excelFill('4B5A60');
+  row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+}
+
+function styleExcelTable(sheet, firstRow, lastRow, firstColumn, lastColumn) {
+  styleExcelHeaderRow(sheet.getRow(firstRow));
+  styleExcelRange(sheet, firstRow, lastRow, firstColumn, lastColumn, { border: true });
+  for (let rowNumber = firstRow + 1; rowNumber <= lastRow; rowNumber += 1) {
+    const row = sheet.getRow(rowNumber);
+    row.alignment = { vertical: 'top', wrapText: true };
+    if (rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = excelFill('FAFBFC'); });
+  }
+}
+
+function styleExcelRange(sheet, firstRow, lastRow, firstColumn, lastColumn, options = {}) {
+  for (let rowNumber = firstRow; rowNumber <= lastRow; rowNumber += 1) {
+    for (let column = firstColumn; column <= lastColumn; column += 1) {
+      const cell = sheet.getCell(rowNumber, column);
+      cell.alignment ||= { vertical: 'top', wrapText: true };
+      if (options.border) {
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFD8E0E4' } },
+          left: { style: 'thin', color: { argb: 'FFD8E0E4' } },
+          bottom: { style: 'thin', color: { argb: 'FFD8E0E4' } },
+          right: { style: 'thin', color: { argb: 'FFD8E0E4' } },
+        };
+      }
+    }
+  }
+}
+
+function styleExcelCurrencyColumn(sheet, column, firstRow, lastRow) {
+  for (let rowNumber = firstRow; rowNumber <= lastRow; rowNumber += 1) {
+    sheet.getCell(rowNumber, column).numFmt = '$#,##0.00';
+  }
+}
+
+function styleExcelCurrencyRow(row, firstColumn, lastColumn) {
+  for (let column = firstColumn; column <= lastColumn; column += 1) {
+    row.getCell(column).numFmt = '$#,##0.00';
+  }
 }
 
 function openPrintView() {
@@ -3426,6 +3688,142 @@ async function exportPdf(includeReceipts = false) {
   const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
   const logo = await imageToDataUrl(logoUrl).catch(() => '');
 
+  addConsolidatedStatementPdfPage(doc, autoTable, logo);
+  addAccountingDetailPdfPage(doc, autoTable, logo);
+
+  if (includeReceipts) {
+    await addReceiptAppendix(doc, logo);
+  }
+
+  addPdfFooters(doc);
+  doc.save(`${safeFileName(projectTitle(), 'accounting-package')}.pdf`);
+}
+
+function addConsolidatedStatementPdfPage(doc, autoTable, logo) {
+  addPdfHeader(doc, logo, 'Consolidated Statement');
+  autoTable(doc, {
+    startY: pdfTableStartY,
+    body: [
+      ['Invoice / Report', meta.value.invoiceNumber || report.value.reportNo || 'Not set', 'Report Date', report.value.reportDate || 'Not set'],
+      ['Employee / Account', `${report.value.employeeName || 'Employee'}${report.value.employeeId ? ` #${report.value.employeeId}` : ''}`, 'Client', meta.value.clientName || 'Not set'],
+      ['Job / PO', [meta.value.jobNumber, meta.value.poNumber].filter(Boolean).join(' / ') || 'Not set', 'Billing Period', formatPeriod() || 'Not set'],
+      ['Contact', [report.value.phone, report.value.email].filter(Boolean).join(' | '), 'Site', meta.value.siteName || meta.value.siteAddress || 'Not set'],
+    ],
+    theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 5 },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: [238, 242, 244] }, 2: { fontStyle: 'bold', fillColor: [238, 242, 244] } },
+    margin: { bottom: 52 },
+  });
+
+  autoTable(doc, {
+    startY: doc.lastAutoTable.finalY + 14,
+    head: [['Date Range', 'Description', 'Qty / Miles', 'Rate', 'Total']],
+    body: [
+      ...statementLaborRows.value.map((row) => [row.date, row.description, row.days, money.format(row.rate), money.format(row.days * row.rate)]),
+      ['', 'Expense category subtotal', '', '', money.format(expenseTotal.value)],
+      ['', `Mileage reimbursement (${number.format(totalMiles.value)} mi)`, number.format(totalMiles.value), mileageRateSummary(), money.format(mileageTotal.value)],
+      ['', 'Total reimbursable expenses', '', '', money.format(expenseTotal.value + mileageTotal.value)],
+    ],
+    foot: [['', '', '', 'TOTAL DUE', money.format(totalDue.value)]],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+    footStyles: { fillColor: [132, 98, 104], fontStyle: 'bold' },
+    styles: { fontSize: 9, cellPadding: 6 },
+    margin: { bottom: 52 },
+  });
+
+  autoTable(doc, {
+    startY: doc.lastAutoTable.finalY + 14,
+    head: [['Category', ...categories, 'Expense Total', 'Mileage Total', 'Total Due']],
+    body: [['Totals', ...categories.map((category) => money.format(expenseCategoryTotals.value[category] || 0)), money.format(expenseTotal.value), money.format(mileageTotal.value), money.format(totalDue.value)]],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+    styles: { fontSize: 7, cellPadding: 4 },
+    margin: { bottom: 52 },
+  });
+}
+
+function addAccountingDetailPdfPage(doc, autoTable, logo) {
+  doc.addPage('letter', 'landscape');
+  addPdfHeader(doc, logo, 'Accounting Detail');
+  autoTable(doc, {
+    startY: pdfTableStartY,
+    head: [['Type', '#', 'Date', 'Vendor / Route', 'Description / Purpose', 'Category / Source', 'Receipt / Rate', 'Miles', 'Amount']],
+    body: accountingDetailTableRows(),
+    foot: [['', '', '', '', '', '', 'Totals', number.format(totalMiles.value), money.format(expenseTotal.value + mileageTotal.value)]],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+    footStyles: { fillColor: [238, 242, 244], textColor: [23, 32, 42], fontStyle: 'bold' },
+    styles: { fontSize: 7, cellPadding: 3, overflow: 'linebreak' },
+    columnStyles: {
+      0: { cellWidth: 44 },
+      1: { cellWidth: 28 },
+      2: { cellWidth: 56 },
+      3: { cellWidth: 135 },
+      4: { cellWidth: 155 },
+      5: { cellWidth: 78 },
+      6: { cellWidth: 86 },
+      7: { cellWidth: 48, halign: 'right' },
+      8: { cellWidth: 62, halign: 'right' },
+    },
+    margin: { top: pdfTableStartY, bottom: 88 },
+    didDrawPage: (hookData) => {
+      if (hookData.pageNumber > 1) addPdfHeader(doc, logo, 'Accounting Detail Continued');
+    },
+  });
+
+  let finalY = doc.lastAutoTable.finalY || pdfTableStartY;
+  if (finalY >= 405) {
+    doc.addPage('letter', 'landscape');
+    addPdfHeader(doc, logo, 'Accounting Detail Continued');
+    finalY = pdfTableStartY;
+  }
+  autoTable(doc, {
+    startY: finalY + 12,
+    head: [['Work Log Summary', 'Date Range', 'Entries', 'Hours', 'Representative Summary']],
+    body: workLogSummaryRows.value.length
+      ? workLogSummaryRows.value.map((row) => [row.label, row.dateRange, row.entries, number.format(row.hours), row.summary || ''])
+      : [['No work log rows', '', '', '', '']],
+    theme: 'grid',
+    headStyles: { fillColor: [75, 90, 96] },
+    styles: { fontSize: 7, cellPadding: 3 },
+    margin: { bottom: 52 },
+  });
+}
+
+function accountingDetailTableRows() {
+  const expenseRows = compactExpenseRows.value.map((row) => [
+    'Expense',
+    row.rowNumber,
+    row.date || '',
+    row.vendor || '',
+    row.description || '',
+    row.category || '',
+    row.receiptReference,
+    '',
+    money.format(Number(row.amount || 0)),
+  ]);
+  const mileageRows = compactMileageRows.value.map((row) => [
+    'Mileage',
+    row.rowNumber,
+    row.date || '',
+    [row.from, row.to].filter(Boolean).join(' -> '),
+    row.purpose || '',
+    row.source,
+    `$${mileageRate.format(row.rate || 0)}`,
+    number.format(row.miles || 0),
+    money.format(row.amount),
+  ]);
+  return [...expenseRows, ...mileageRows].length ? [...expenseRows, ...mileageRows] : [['No detail rows', '', '', '', '', '', '', '', money.format(0)]];
+}
+
+async function exportDetailedPdf(includeReceipts = false) {
+  const { jsPDF } = await import('jspdf');
+  const autoTableModule = await import('jspdf-autotable');
+  const autoTable = autoTableModule.default;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  const logo = await imageToDataUrl(logoUrl).catch(() => '');
+
   addPdfHeader(doc, logo, 'Expense Statement');
   autoTable(doc, {
     startY: pdfTableStartY,
@@ -3497,7 +3895,7 @@ async function exportPdf(includeReceipts = false) {
   }
 
   addPdfFooters(doc);
-  doc.save(`${projectTitle().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'expense-report'}.pdf`);
+  doc.save(`${safeFileName(projectTitle(), 'expense-report')}-detailed.pdf`);
 }
 
 async function addReceiptAppendix(doc, logo) {
@@ -4131,6 +4529,8 @@ onBeforeUnmount(() => {
         <button class="secondary" type="button" @click="openPrintView">Print View</button>
         <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
         <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
+        <button class="secondary" type="button" @click="exportDetailedPdf(false)">Detailed PDF</button>
+        <button class="secondary" type="button" @click="exportExcelPackage">Export Excel</button>
         <button class="secondary" type="button" @click="resetToBlankTemplate">Reset blank</button>
       </div>
     </header>
@@ -4218,6 +4618,7 @@ onBeforeUnmount(() => {
           <button class="secondary" type="button" @click="saveDetailsToMongo">Save</button>
           <button class="secondary" type="button" @click="openPrintView">Print</button>
           <button class="secondary" type="button" @click="exportPdf(false)">PDF</button>
+          <button class="secondary" type="button" @click="exportExcelPackage">Excel</button>
         </div>
         <div class="review-checklist">
           <h3>Project checklist</h3>
@@ -4239,6 +4640,8 @@ onBeforeUnmount(() => {
           <button type="button" @click="printPackage">Print Package</button>
           <button class="secondary" type="button" @click="exportPdf(false)">Export PDF</button>
           <button class="secondary" type="button" @click="exportPdf(true)">PDF + Receipts</button>
+          <button class="secondary" type="button" @click="exportDetailedPdf(false)">Detailed PDF</button>
+          <button class="secondary" type="button" @click="exportExcelPackage">Export Excel</button>
         </div>
       </div>
 
@@ -4247,7 +4650,7 @@ onBeforeUnmount(() => {
           <header class="print-page-header">
             <img :src="logoUrl" alt="Workplace Learning System" />
             <div>
-              <h2>Expense Statement</h2>
+              <h2>Consolidated Statement</h2>
               <p>{{ projectTitle() }}</p>
             </div>
           </header>
@@ -4262,12 +4665,13 @@ onBeforeUnmount(() => {
               <dt>INVOICE NO.</dt><dd>{{ meta.invoiceNumber || report.reportNo }}</dd>
               <dt>CLIENT</dt><dd>{{ meta.clientName }}</dd>
               <dt>JOB / PO</dt><dd>{{ [meta.jobNumber, meta.poNumber].filter(Boolean).join(' / ') }}</dd>
+              <dt>ACCOUNT #</dt><dd>{{ report.employeeId || state.auth.member?.accountNumber || 'Not set' }}</dd>
               <dt>DATE</dt><dd>{{ report.reportDate }}</dd>
               <dt>PERIOD</dt><dd>{{ formatPeriod() }}</dd>
             </dl>
           </div>
           <table class="sheet-table statement-table">
-            <thead><tr><th>Date Range</th><th>Description</th><th># of Days</th><th>Daily Rate</th><th>Total</th></tr></thead>
+            <thead><tr><th>Date Range</th><th>Description</th><th>Qty / Miles</th><th>Rate</th><th>Total</th></tr></thead>
             <tbody>
               <tr v-for="row in statementLaborRows" :key="`print-${row.label}`">
                 <td>{{ row.date }}</td>
@@ -4276,83 +4680,23 @@ onBeforeUnmount(() => {
                 <td>{{ money.format(row.rate) }}</td>
                 <td>{{ money.format(row.days * row.rate) }}</td>
               </tr>
-              <tr><td></td><td>Expenses</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
-              <tr><td></td><td>Mileage ({{ number.format(totalMiles) }} mi)</td><td></td><td></td><td>{{ money.format(mileageTotal) }}</td></tr>
-              <tr><td></td><td>Total expenses</td><td></td><td></td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr>
+              <tr><td></td><td>Expense category subtotal</td><td></td><td></td><td>{{ money.format(expenseTotal) }}</td></tr>
+              <tr><td></td><td>Mileage reimbursement</td><td>{{ number.format(totalMiles) }} mi</td><td>{{ mileageRateSummary() }}</td><td>{{ money.format(mileageTotal) }}</td></tr>
+              <tr><td></td><td>Total reimbursable expenses</td><td></td><td></td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr>
             </tbody>
             <tfoot><tr><td colspan="4">TOTAL DUE</td><td>{{ money.format(totalDue) }}</td></tr></tfoot>
           </table>
-          <footer class="print-footer">
-            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
-            <span>Title: {{ projectTitle() }}</span>
-            <span>Date: {{ reportPrintDate() }}</span>
-            <span class="footer-brand">{{ footerBrandText }}</span>
-          </footer>
-        </article>
-
-        <article class="print-page">
-          <header class="print-page-header">
-            <img :src="logoUrl" alt="Workplace Learning System" />
-            <div>
-              <h2>Expense Report</h2>
-              <p>{{ formatPeriod() }}</p>
-            </div>
-          </header>
-          <div class="table-scroll">
-            <table class="sheet-table wide-table">
-              <thead>
-                <tr>
-                  <th>Date</th><th>Vendor</th><th>Description</th>
-                  <th v-for="category in categories" :key="`print-category-${category}`">{{ category }}</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in data.expenseRows" :key="`print-expense-${row.id}`">
-                  <td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td>
-                  <td v-for="category in categories" :key="`print-expense-${row.id}-${category}`">{{ row.category === category ? money.format(row.amount) : '' }}</td>
-                  <td>{{ money.format(row.amount) }}</td>
-                </tr>
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colspan="3">Subtotal</td>
-                  <td v-for="category in categories" :key="`print-total-${category}`">{{ money.format(expenseCategoryTotals[category]) }}</td>
-                  <td>{{ money.format(expenseTotal) }}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-          <footer class="print-footer">
-            <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
-            <span>Title: {{ projectTitle() }}</span>
-            <span>Date: {{ reportPrintDate() }}</span>
-            <span class="footer-brand">{{ footerBrandText }}</span>
-          </footer>
-        </article>
-
-        <article class="print-page">
-          <header class="print-page-header">
-            <img :src="logoUrl" alt="Workplace Learning System" />
-            <div>
-              <h2>Mileage Report</h2>
-              <p>{{ number.format(totalMiles) }} total miles</p>
-            </div>
-          </header>
-          <table class="sheet-table">
-            <thead><tr><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th></tr></thead>
+          <table class="sheet-table statement-table compact-category-summary">
+            <thead>
+              <tr><th>Category</th><th v-for="category in categories" :key="`compact-category-${category}`">{{ category }}</th><th>Total</th></tr>
+            </thead>
             <tbody>
-              <tr v-for="row in data.mileageRows" :key="`print-mileage-${row.id}`">
-                <td>{{ row.date }}</td>
-                <td>{{ row.from }}</td>
-                <td>{{ row.to }}</td>
-                <td>{{ row.purpose }}</td>
-                <td>{{ number.format(row.miles) }}</td>
-                <td>${{ mileageRate.format(row.rate) }}</td>
-                <td>{{ money.format(row.miles * row.rate) }}</td>
+              <tr>
+                <td>Expenses</td>
+                <td v-for="category in categories" :key="`compact-category-total-${category}`">{{ money.format(expenseCategoryTotals[category] || 0) }}</td>
+                <td>{{ money.format(expenseTotal) }}</td>
               </tr>
             </tbody>
-            <tfoot><tr><td colspan="4">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td></td><td>{{ money.format(mileageTotal) }}</td></tr></tfoot>
           </table>
           <footer class="print-footer">
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
@@ -4362,24 +4706,39 @@ onBeforeUnmount(() => {
           </footer>
         </article>
 
-        <article class="print-page">
+        <article class="print-page accounting-detail-page">
           <header class="print-page-header">
             <img :src="logoUrl" alt="Workplace Learning System" />
             <div>
-              <h2>Work Log</h2>
-              <p>{{ number.format(totalHours) }} total hours</p>
+              <h2>Accounting Detail</h2>
+              <p>Expenses, mileage, and work log summary</p>
             </div>
           </header>
           <div class="table-scroll">
-            <table class="sheet-table wide-table">
-              <thead><tr><th>#</th><th>Date</th><th>Client / Site</th><th>Location</th><th>Task Category</th><th>Hours</th><th>Work Summary</th><th>Key Findings / Actions</th><th>Status</th></tr></thead>
+            <table class="sheet-table accounting-detail-table">
+              <thead>
+                <tr><th>Type</th><th>#</th><th>Date</th><th>Vendor / Route</th><th>Description / Purpose</th><th>Category / Source</th><th>Receipt / Rate</th><th>Miles</th><th>Amount</th></tr>
+              </thead>
               <tbody>
-                <tr v-for="(row, index) in data.workLogs" :key="`print-work-${row.id}`">
-                  <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.clientSite }}</td><td>{{ row.location }}</td><td>{{ row.taskCategory }}</td><td>{{ row.hours }}</td><td>{{ row.summary }}</td><td>{{ row.actions }}</td><td>{{ row.status }}</td>
+                <tr v-for="row in compactExpenseRows" :key="`compact-expense-${row.id}`">
+                  <td>Expense</td><td>{{ row.rowNumber }}</td><td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td><td>{{ row.category }}</td><td>{{ row.receiptReference }}</td><td></td><td>{{ money.format(row.amount) }}</td>
+                </tr>
+                <tr v-for="row in compactMileageRows" :key="`compact-mileage-${row.id}`">
+                  <td>Mileage</td><td>{{ row.rowNumber }}</td><td>{{ row.date }}</td><td>{{ [row.from, row.to].filter(Boolean).join(' -> ') }}</td><td>{{ row.purpose }}</td><td>{{ row.source }}</td><td>${{ mileageRate.format(row.rate || 0) }}</td><td>{{ number.format(row.miles) }}</td><td>{{ money.format(row.amount) }}</td>
                 </tr>
               </tbody>
+              <tfoot><tr><td colspan="7">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td>{{ money.format(expenseTotal + mileageTotal) }}</td></tr></tfoot>
             </table>
           </div>
+          <table class="sheet-table statement-table work-summary-table">
+            <thead><tr><th>Work Log Summary</th><th>Date Range</th><th>Entries</th><th>Hours</th><th>Representative Summary</th></tr></thead>
+            <tbody>
+              <tr v-if="!workLogSummaryRows.length"><td>No work log rows</td><td></td><td></td><td></td><td></td></tr>
+              <tr v-for="row in workLogSummaryRows" :key="`work-summary-${row.label}`">
+                <td>{{ row.label }}</td><td>{{ row.dateRange }}</td><td>{{ row.entries }}</td><td>{{ number.format(row.hours) }}</td><td>{{ row.summary }}</td>
+              </tr>
+            </tbody>
+          </table>
           <footer class="print-footer">
             <span>Invoice: {{ meta.invoiceNumber || report.reportNo || 'Not set' }}</span>
             <span>Title: {{ projectTitle() }}</span>
