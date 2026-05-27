@@ -1511,6 +1511,45 @@ h3 {
   gap: 8px;
 }
 
+.saved-location-list,
+.mileage-draft-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-location-list article,
+.mileage-draft-list label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #d8e0e4;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f8fafb;
+}
+
+.saved-location-list strong,
+.saved-location-list span {
+  display: block;
+}
+
+.saved-location-list span,
+.mileage-draft-list span {
+  color: #627078;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mileage-draft-list label {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.mileage-draft-list input {
+  width: 18px;
+  min-height: 18px;
+}
+
 .mileage-table {
   min-width: 1080px;
 }

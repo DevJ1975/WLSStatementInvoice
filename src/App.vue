@@ -1,11 +1,13 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { createRoundTripRows, reverseRouteGeometry, workLogDatesMissingMileage } from './mileageLogic.mjs';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
 const entryDefaultsStorageKey = 'wls-entry-defaults-v1';
 const deviceDraftPrefix = 'device-draft-';
 const categories = ['Hotel', 'Transport', 'Fuel', 'Meals', 'Phone', 'Entertain.', 'Misc.'];
+const mileageLocationTypes = ['home', 'office', 'site', 'hotel', 'airport', 'custom'];
 const tabs = [
   ['dashboard', 'Dashboard'],
   ['archive', 'Archive'],
@@ -152,6 +154,15 @@ const state = reactive({
       pin: '',
     },
   },
+  preferences: {
+    loading: false,
+    saving: false,
+    status: '',
+    error: '',
+    mileageLocations: [],
+    draftLocation: blankSavedLocationDraft(),
+  },
+  mileageDrafts: [],
   gps: {
     active: false,
     watchId: null,
@@ -204,6 +215,8 @@ const mileageForm = reactive({
   purpose: '',
   miles: '',
   rate: '0.725',
+  fromSavedLocationId: '',
+  toSavedLocationId: '',
   fromPlace: null,
   toPlace: null,
   routeGeometry: [],
@@ -284,13 +297,16 @@ const syncStatusText = computed(() => {
   if (state.storage === 'mongodb') return state.lastSavedAt ? `Cloud saved ${formatDateTime(state.lastSavedAt)}` : 'Cloud sync active';
   return state.lastSavedAt ? `Saved on this device ${formatDateTime(state.lastSavedAt)}` : 'Local fallback';
 });
+const selectedMileageDraft = computed(() => state.mileageDrafts.find((draft) => draft.id === state.gps.selectedMileageId) || null);
 const selectedMileageRoute = computed(() => {
   if (state.gps.selectedMileageId === 'draft-route') return null;
+  if (selectedMileageDraft.value) return selectedMileageDraft.value;
   return routeMileageRows.value.find((row) => row.id === state.gps.selectedMileageId) || routeMileageRows.value[0] || null;
 });
 const displayedRoutePoints = computed(() => {
   if (state.gps.active) return state.gps.routePoints;
   if (state.gps.selectedMileageId === 'draft-route') return mileageForm.routeGeometry;
+  if (selectedMileageDraft.value) return rowRoutePoints(selectedMileageDraft.value);
   return rowRoutePoints(selectedMileageRoute.value);
 });
 const liveGpsMiles = computed(() => metersToMiles(totalRouteMeters(state.gps.routePoints)));
@@ -320,6 +336,8 @@ const membersById = computed(() => new Map(state.admin.members.map((member) => [
 const currentProjectMember = computed(() => membersById.value.get(state.currentProject?.memberId) || null);
 const accountFieldReadonly = computed(() => state.auth.member?.role === 'member' || Boolean(currentProjectMember.value));
 const printReceiptPages = computed(() => chunkList(data.value.receipts, 4));
+const savedMileageLocations = computed(() => state.preferences.mileageLocations);
+const selectedMileageDrafts = computed(() => state.mileageDrafts.filter((draft) => draft.selected));
 
 function newId() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -400,6 +418,14 @@ function emptyReceiptDraft() {
   };
 }
 
+function blankSavedLocationDraft() {
+  return {
+    label: '',
+    type: 'home',
+    address: '',
+  };
+}
+
 function blankEntryDefaults() {
   return {
     employeeName: '',
@@ -442,6 +468,29 @@ function normalizePlace(place) {
     state: place.state || '',
     postcode: place.postcode || '',
   };
+}
+
+function normalizeSavedMileageLocation(location) {
+  const place = normalizePlace(location?.place || location);
+  return {
+    id: location?.id || newId(),
+    label: location?.label || location?.type || 'Location',
+    type: mileageLocationTypes.includes(location?.type) ? location.type : 'custom',
+    address: location?.address || place?.label || '',
+    place,
+  };
+}
+
+function savedLocationById(id) {
+  return savedMileageLocations.value.find((location) => location.id === id) || null;
+}
+
+function savedLocationByType(...types) {
+  return savedMileageLocations.value.find((location) => types.includes(location.type)) || null;
+}
+
+function savedLocationPlace(location) {
+  return normalizePlace(location?.place || location);
 }
 
 function normalizeMileageRow(row) {
@@ -871,6 +920,8 @@ function seedMileageForm() {
     purpose: '',
     miles: '',
     rate: state.entryDefaults.mileageRate || '0.725',
+    fromSavedLocationId: '',
+    toSavedLocationId: '',
     fromPlace: null,
     toPlace: null,
     routeGeometry: [],
@@ -1121,6 +1172,7 @@ async function createProject(title = 'Untitled expense project') {
     state.currentProject = project;
     seedMileageForm();
     seedWorkLogForm();
+    state.mileageDrafts = [];
     refreshReceiptQueue();
     await saveCurrentProject();
     return;
@@ -1131,6 +1183,7 @@ async function createProject(title = 'Untitled expense project') {
   state.currentProject = project;
   seedMileageForm();
   seedWorkLogForm();
+  state.mileageDrafts = [];
   saveLocalArchive();
 }
 
@@ -1144,6 +1197,7 @@ async function openProject(id) {
     refreshReceiptQueue();
     seedMileageForm();
     seedWorkLogForm();
+    state.mileageDrafts = [];
     saveLocalArchive();
     return;
   }
@@ -1153,6 +1207,7 @@ async function openProject(id) {
   refreshReceiptQueue();
   seedMileageForm();
   seedWorkLogForm();
+  state.mileageDrafts = [];
   saveLocalArchive();
 }
 
@@ -1620,6 +1675,77 @@ function calculatorEquals() {
   calculator.waitingForOperand = true;
 }
 
+async function loadMemberPreferences() {
+  state.preferences.loading = true;
+  state.preferences.error = '';
+  try {
+    const payload = await apiJson('/api/me/preferences');
+    state.preferences.mileageLocations = (payload.preferences?.mileageLocations || []).map(normalizeSavedMileageLocation);
+  } catch (error) {
+    state.preferences.error = error.message || 'Saved locations are unavailable.';
+  } finally {
+    state.preferences.loading = false;
+  }
+}
+
+async function saveMemberPreferences() {
+  state.preferences.saving = true;
+  state.preferences.error = '';
+  try {
+    const payload = await apiJson('/api/me/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        preferences: {
+          mileageLocations: state.preferences.mileageLocations,
+        },
+      }),
+    });
+    state.preferences.mileageLocations = (payload.preferences?.mileageLocations || []).map(normalizeSavedMileageLocation);
+    state.preferences.status = 'Saved locations updated.';
+  } catch (error) {
+    state.preferences.error = error.message || 'Could not save mileage locations.';
+  } finally {
+    state.preferences.saving = false;
+  }
+}
+
+async function addSavedMileageLocation() {
+  const draft = state.preferences.draftLocation;
+  const address = draft.address.trim();
+  if (!address) {
+    state.preferences.error = 'Enter an address before saving a mileage location.';
+    return;
+  }
+  state.preferences.saving = true;
+  state.preferences.error = '';
+  try {
+    const place = await resolvePlaceFromText(address);
+    if (!place) throw new Error('Address lookup did not find this location.');
+    const location = normalizeSavedMileageLocation({
+      id: newId(),
+      label: draft.label.trim() || draft.type,
+      type: draft.type,
+      address: place.label || address,
+      place,
+    });
+    state.preferences.mileageLocations = [
+      location,
+      ...state.preferences.mileageLocations.filter((item) => item.id !== location.id),
+    ].slice(0, 24);
+    state.preferences.draftLocation = blankSavedLocationDraft();
+    await saveMemberPreferences();
+  } catch (error) {
+    state.preferences.error = error.message || 'Could not save mileage location.';
+  } finally {
+    state.preferences.saving = false;
+  }
+}
+
+async function removeSavedMileageLocation(locationId) {
+  state.preferences.mileageLocations = state.preferences.mileageLocations.filter((location) => location.id !== locationId);
+  await saveMemberPreferences();
+}
+
 async function loadMembers() {
   if (!isAdmin.value) return;
   state.admin.loading = true;
@@ -1794,8 +1920,18 @@ async function addExpense() {
 }
 
 async function addMileage() {
+  const row = mileageRowFromForm();
+  if (warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
+  data.value.mileageRows.push(row);
+  state.duplicateWarning = '';
+  updateEntryDefaultsFromMileage(row);
+  resetMileageForm();
+  await saveCurrentProject();
+}
+
+function mileageRowFromForm(overrides = {}) {
   const isAddressRoute = mileageForm.calculationMode === 'address-route' && mileageForm.routeGeometry.length;
-  const row = {
+  return {
     id: newId(),
     trackingMode: 'manual',
     calculationMode: isAddressRoute ? 'address-route' : 'manual',
@@ -1814,13 +1950,8 @@ async function addMileage() {
     durationSeconds: isAddressRoute ? Number(mileageForm.routeDurationSeconds || 0) : 0,
     startLocation: '',
     endLocation: '',
+    ...overrides,
   };
-  if (warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
-  data.value.mileageRows.push(row);
-  state.duplicateWarning = '';
-  updateEntryDefaultsFromMileage(row);
-  resetMileageForm();
-  await saveCurrentProject();
 }
 
 function resetMileageForm() {
@@ -1904,14 +2035,7 @@ async function calculateAddressMileage() {
   if (!mileageForm.fromPlace || !mileageForm.toPlace) return;
   try {
     state.places.routeLoading = true;
-    const params = new URLSearchParams({
-      fromLat: mileageForm.fromPlace.lat,
-      fromLng: mileageForm.fromPlace.lng,
-      toLat: mileageForm.toPlace.lat,
-      toLng: mileageForm.toPlace.lng,
-    });
-    const payload = await apiJson(`/api/places/route?${params.toString()}`);
-    const route = payload.route || {};
+    const route = await fetchRouteBetweenPlaces(mileageForm.fromPlace, mileageForm.toPlace);
     mileageForm.miles = route.distanceMiles || '';
     mileageForm.routeDistanceMiles = route.distanceMiles || 0;
     mileageForm.routeDurationSeconds = route.durationSeconds || 0;
@@ -1927,7 +2051,65 @@ async function calculateAddressMileage() {
   }
 }
 
+async function fetchRouteBetweenPlaces(fromPlace, toPlace) {
+  const params = new URLSearchParams({
+    fromLat: fromPlace.lat,
+    fromLng: fromPlace.lng,
+    toLat: toPlace.lat,
+    toLng: toPlace.lng,
+  });
+  const payload = await apiJson(`/api/places/route?${params.toString()}`);
+  return payload.route || {};
+}
+
+async function applySavedLocationToMileage(field, locationId) {
+  const location = savedLocationById(locationId);
+  const place = savedLocationPlace(location);
+  const placeKey = `${field}Place`;
+  if (!location || !place) {
+    mileageForm[`${field}SavedLocationId`] = '';
+    return;
+  }
+  mileageForm[field] = location.address || place.label;
+  mileageForm[placeKey] = place;
+  clearAddressRoute();
+  state.places.error = '';
+  if (mileageForm.fromPlace && mileageForm.toPlace) {
+    await calculateAddressMileage();
+  }
+}
+
+async function applyLocationRoute(fromLocation, toLocation, purpose) {
+  const fromPlace = savedLocationPlace(fromLocation);
+  const toPlace = savedLocationPlace(toLocation);
+  if (!fromLocation || !toLocation || !fromPlace || !toPlace) {
+    state.places.error = 'Save the needed mileage locations before using this quick route.';
+    return;
+  }
+  Object.assign(mileageForm, {
+    date: mileageForm.date || data.value.workLogs[data.value.workLogs.length - 1]?.date || currentDateInputValue(),
+    from: fromLocation.address || fromPlace.label,
+    to: toLocation.address || toPlace.label,
+    purpose,
+    rate: state.entryDefaults.mileageRate || mileageForm.rate || '0.725',
+    fromSavedLocationId: fromLocation.id,
+    toSavedLocationId: toLocation.id,
+    fromPlace,
+    toPlace,
+  });
+  clearAddressRoute();
+  await calculateAddressMileage();
+}
+
 async function applyQuickMileageRoute(direction) {
+  const home = savedLocationByType('home', 'office');
+  const savedSite = savedLocationByType('site');
+  const hotel = savedLocationByType('hotel');
+  if (direction === 'home-to-site') return applyLocationRoute(home, savedSite, 'Travel to site');
+  if (direction === 'site-to-home') return applyLocationRoute(savedSite, home, 'Return from site');
+  if (direction === 'hotel-to-site') return applyLocationRoute(hotel, savedSite, 'Travel to site');
+  if (direction === 'site-to-hotel') return applyLocationRoute(savedSite, hotel, 'Return to hotel');
+
   const start = state.entryDefaults.startAddress || report.value.address || '';
   const site = meta.value.siteAddress || meta.value.siteName || state.entryDefaults.siteAddress || state.entryDefaults.siteName || '';
   const fromText = direction === 'site-to-start' ? site : start;
@@ -1939,6 +2121,8 @@ async function applyQuickMileageRoute(direction) {
     to: toText,
     purpose: direction === 'site-to-start' ? 'Return from site' : 'Travel to site',
     rate: state.entryDefaults.mileageRate || mileageForm.rate || '0.725',
+    fromSavedLocationId: '',
+    toSavedLocationId: '',
     fromPlace: null,
     toPlace: null,
   });
@@ -1962,6 +2146,102 @@ async function applyQuickMileageRoute(direction) {
   }
 }
 
+async function addRoundTripMileage() {
+  if (!mileageForm.from.trim() || !mileageForm.to.trim()) {
+    state.places.error = 'Choose From and To before creating a round trip.';
+    return;
+  }
+  if (!mileageForm.routeGeometry.length && mileageForm.fromPlace && mileageForm.toPlace) {
+    await calculateAddressMileage();
+  }
+  const outbound = mileageRowFromForm({
+    purpose: mileageForm.purpose.trim() || 'Outbound trip',
+    returnPurpose: 'Return trip',
+  });
+  const rows = createRoundTripRows(outbound, newId);
+  rows.forEach((row) => {
+    if (row.calculationMode === 'address-route' && !row.routeGeometry.length && outbound.routeGeometry.length) {
+      row.routeGeometry = row.from === outbound.from ? [...outbound.routeGeometry] : reverseRouteGeometry(outbound.routeGeometry);
+    }
+  });
+  data.value.mileageRows.push(...rows);
+  state.duplicateWarning = '';
+  updateEntryDefaultsFromMileage(rows[0]);
+  resetMileageForm();
+  await saveCurrentProject();
+}
+
+function preferredMileageStartLocation() {
+  return savedLocationByType('hotel') || savedLocationByType('home', 'office');
+}
+
+async function generateWorkLogMileageDrafts() {
+  const fromLocation = preferredMileageStartLocation();
+  const toLocation = savedLocationByType('site');
+  const fromPlace = savedLocationPlace(fromLocation);
+  const toPlace = savedLocationPlace(toLocation);
+  if (!fromLocation || !toLocation || !fromPlace || !toPlace) {
+    state.places.error = 'Save a Home/Office or Hotel location and a Site location before generating work-log mileage.';
+    return;
+  }
+
+  const missingDates = workLogDatesMissingMileage(data.value.workLogs, data.value.mileageRows);
+  if (!missingDates.length) {
+    state.places.error = 'No work-log dates are missing mileage.';
+    state.mileageDrafts = [];
+    return;
+  }
+
+  try {
+    state.places.routeLoading = true;
+    const route = await fetchRouteBetweenPlaces(fromPlace, toPlace);
+    const routeGeometry = Array.isArray(route.routeGeometry) ? route.routeGeometry.map(normalizeRoutePoint) : [];
+    state.mileageDrafts = missingDates.map((date) => ({
+      id: newId(),
+      selected: true,
+      trackingMode: 'manual',
+      calculationMode: routeGeometry.length ? 'address-route' : 'manual',
+      date,
+      from: fromLocation.address || fromPlace.label,
+      to: toLocation.address || toPlace.label,
+      purpose: 'Travel to site',
+      miles: Number(route.distanceMiles || 0),
+      rate: Number(state.entryDefaults.mileageRate || mileageForm.rate || 0.725),
+      routePoints: [],
+      routeGeometry: [...routeGeometry],
+      routeDistanceMiles: Number(route.distanceMiles || 0),
+      fromPlace,
+      toPlace,
+      distanceMiles: Number(route.distanceMiles || 0),
+      durationSeconds: Number(route.durationSeconds || 0),
+      startLocation: '',
+      endLocation: '',
+    }));
+    state.places.error = '';
+  } catch (error) {
+    state.places.error = error.message || 'Could not generate mileage drafts.';
+  } finally {
+    state.places.routeLoading = false;
+  }
+}
+
+async function saveSelectedMileageDrafts() {
+  const rows = selectedMileageDrafts.value.map(({ selected, ...row }) => ({
+    ...row,
+    id: newId(),
+    routeGeometry: Array.isArray(row.routeGeometry) ? row.routeGeometry.map(normalizeRoutePoint) : [],
+  }));
+  if (!rows.length) {
+    state.places.error = 'Select at least one mileage draft to save.';
+    return;
+  }
+  data.value.mileageRows.push(...rows);
+  updateEntryDefaultsFromMileage(rows[rows.length - 1]);
+  state.mileageDrafts = [];
+  state.places.error = '';
+  await saveCurrentProject();
+}
+
 function repeatLastMileageRoute() {
   const route = state.entryDefaults.lastMileageRoute;
   if (!route) {
@@ -1976,6 +2256,8 @@ function repeatLastMileageRoute() {
     purpose: route.purpose || 'Repeat route',
     miles: route.routeDistanceMiles || '',
     rate: state.entryDefaults.mileageRate || mileageForm.rate || '0.725',
+    fromSavedLocationId: '',
+    toSavedLocationId: '',
     fromPlace: route.fromPlace || null,
     toPlace: route.toPlace || null,
     routeGeometry: Array.isArray(route.routeGeometry) ? route.routeGeometry.map(normalizeRoutePoint) : [],
@@ -2768,6 +3050,7 @@ async function initializeSecurity() {
     state.auth.checked = true;
     if (state.auth.authenticated) {
       if (state.auth.member.role === 'admin') await loadMembers();
+      await loadMemberPreferences();
       startHeaderWeather();
       await loadProjects();
     } else {
@@ -2797,6 +3080,7 @@ async function loginWithAccount() {
     state.auth.setupRequired = false;
     state.auth.pinInput = '';
     if (state.auth.member.role === 'admin') await loadMembers();
+    await loadMemberPreferences();
     startHeaderWeather();
     await loadProjects();
   } catch (error) {
@@ -2819,6 +3103,7 @@ async function setupFirstAdmin() {
     state.auth.setupRequired = false;
     state.auth.setup.pin = '';
     await loadMembers();
+    await loadMemberPreferences();
     startHeaderWeather();
     await loadProjects();
   } catch (error) {
@@ -2834,6 +3119,8 @@ async function logoutAccount() {
   state.auth.member = null;
   state.projects = [];
   state.currentProject = null;
+  state.preferences.mileageLocations = [];
+  state.mileageDrafts = [];
   state.tab = 'dashboard';
   state.loading = false;
 }
@@ -4378,11 +4665,28 @@ onBeforeUnmount(() => {
         <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addMileage">
           <h2>Add mileage</h2>
           <div class="quick-route-actions">
-            <button class="secondary" type="button" @click="applyQuickMileageRoute('start-to-site')">Start -> Site</button>
-            <button class="secondary" type="button" @click="applyQuickMileageRoute('site-to-start')">Site -> Start</button>
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('home-to-site')">Home -> Site</button>
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('site-to-home')">Site -> Home</button>
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('hotel-to-site')">Hotel -> Site</button>
+            <button class="secondary" type="button" @click="applyQuickMileageRoute('site-to-hotel')">Site -> Hotel</button>
             <button class="secondary" type="button" @click="repeatLastMileageRoute">Repeat last route</button>
+            <button class="secondary" type="button" @click="addRoundTripMileage">Round trip</button>
           </div>
           <input v-model="mileageForm.date" type="date" required />
+          <div class="inline-fields">
+            <select v-model="mileageForm.fromSavedLocationId" @change="applySavedLocationToMileage('from', mileageForm.fromSavedLocationId)">
+              <option value="">From saved location</option>
+              <option v-for="location in savedMileageLocations" :key="`from-location-${location.id}`" :value="location.id">
+                {{ location.label }} ({{ location.type }})
+              </option>
+            </select>
+            <select v-model="mileageForm.toSavedLocationId" @change="applySavedLocationToMileage('to', mileageForm.toSavedLocationId)">
+              <option value="">To saved location</option>
+              <option v-for="location in savedMileageLocations" :key="`to-location-${location.id}`" :value="location.id">
+                {{ location.label }} ({{ location.type }})
+              </option>
+            </select>
+          </div>
           <div class="address-field">
             <input
               v-model="mileageForm.from"
@@ -4436,6 +4740,52 @@ onBeforeUnmount(() => {
           </p>
           <button type="submit">Add mileage</button>
         </form>
+
+        <div class="gps-panel saved-locations-panel">
+          <div>
+            <h2>Saved locations</h2>
+            <p class="muted">Locations are saved to this account and sync across devices.</p>
+          </div>
+          <div class="inline-fields compact">
+            <select v-model="state.preferences.draftLocation.type">
+              <option v-for="type in mileageLocationTypes" :key="type" :value="type">{{ type }}</option>
+            </select>
+            <input v-model="state.preferences.draftLocation.label" placeholder="Label" />
+          </div>
+          <input v-model="state.preferences.draftLocation.address" placeholder="Address" />
+          <p v-if="state.preferences.error" class="status-message gps-message">{{ state.preferences.error }}</p>
+          <p v-if="state.preferences.status" class="sync-status">{{ state.preferences.status }}</p>
+          <button type="button" :disabled="state.preferences.saving" @click="addSavedMileageLocation">
+            {{ state.preferences.saving ? 'Saving location...' : 'Save location' }}
+          </button>
+          <div v-if="savedMileageLocations.length" class="saved-location-list">
+            <article v-for="location in savedMileageLocations" :key="location.id">
+              <div>
+                <strong>{{ location.label }}</strong>
+                <span>{{ location.type }} | {{ location.address }}</span>
+              </div>
+              <button class="icon" type="button" @click="removeSavedMileageLocation(location.id)">Delete</button>
+            </article>
+          </div>
+        </div>
+
+        <div class="gps-panel mileage-draft-panel">
+          <div>
+            <h2>Work log mileage suggestions</h2>
+            <p class="muted">Create reviewable mileage drafts for work-log dates without mileage.</p>
+          </div>
+          <button class="secondary" type="button" :disabled="state.places.routeLoading" @click="generateWorkLogMileageDrafts">
+            {{ state.places.routeLoading ? 'Generating...' : 'Generate work-log mileage drafts' }}
+          </button>
+          <div v-if="state.mileageDrafts.length" class="mileage-draft-list">
+            <label v-for="draft in state.mileageDrafts" :key="draft.id">
+              <input v-model="draft.selected" type="checkbox" />
+              <span>{{ draft.date }} | {{ draft.from }} -> {{ draft.to }} | {{ number.format(draft.miles) }} mi</span>
+              <button class="icon" type="button" @click="selectMileageRoute(draft)">Map</button>
+            </label>
+            <button type="button" @click="saveSelectedMileageDrafts">Save selected drafts</button>
+          </div>
+        </div>
 
         <div class="gps-panel">
           <div>
@@ -4492,7 +4842,7 @@ onBeforeUnmount(() => {
 
         <div class="route-map-panel">
           <div class="sheet-title-row">
-            <span>{{ state.gps.active ? 'Live GPS route' : state.gps.selectedMileageId === 'draft-route' ? 'Calculated address route' : 'Saved route' }}</span>
+            <span>{{ state.gps.active ? 'Live GPS route' : state.gps.selectedMileageId === 'draft-route' ? 'Calculated address route' : selectedMileageDraft ? 'Suggested mileage route' : 'Saved route' }}</span>
             <strong v-if="selectedMileageRoute && !state.gps.active">
               {{ number.format(routeMetrics(selectedMileageRoute).miles) }} mi
             </strong>
