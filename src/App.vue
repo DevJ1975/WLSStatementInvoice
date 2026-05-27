@@ -1,6 +1,16 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { createRoundTripRows, reverseRouteGeometry, routeThumbnailPolyline, workLogDatesMissingMileage } from './mileageLogic.mjs';
+import {
+  autoWorkLogSummary,
+  datesForWeekdayRange,
+  inferWorkTypeForDate,
+  nextWeekdayInPeriod as nextAvailableWorkLogDate,
+  workLogHourOptions,
+  workLogLocationForType,
+  workLogStatuses,
+  workLogTypes,
+} from './workLogLogic.mjs';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
@@ -228,7 +238,18 @@ const mileageForm = reactive({
   routeDurationSeconds: 0,
   calculationMode: 'manual',
 });
-const workLogForm = reactive({ date: '', clientSite: '', location: '', taskCategory: '', hours: '', summary: '', actions: '', status: '' });
+const workLogForm = reactive({
+  date: '',
+  clientSite: '',
+  location: '',
+  taskCategory: '',
+  hours: '',
+  hourPreset: '8',
+  summary: '',
+  actions: '',
+  status: '',
+  showDetails: false,
+});
 let gpsTimer = null;
 let autosaveTimer = null;
 let localArchiveTimer = null;
@@ -361,6 +382,25 @@ const compactMileageRows = computed(() =>
   }))
 );
 const workLogSummaryRows = computed(() => summarizeWorkLogs(data.value.workLogs));
+const workLogDateHasExisting = computed(() => data.value.workLogs.some((row) => row.date === workLogForm.date));
+const workLogDateOutsideLaborRanges = computed(() => {
+  if (!workLogForm.date) return false;
+  const hasLaborRanges = (report.value.onsiteFrom && report.value.onsiteTo) || (report.value.remoteFrom && report.value.remoteTo);
+  if (!hasLaborRanges) return false;
+  return !(
+    (report.value.onsiteFrom && report.value.onsiteTo && dateInsideRange(workLogForm.date, report.value.onsiteFrom, report.value.onsiteTo)) ||
+    (report.value.remoteFrom && report.value.remoteTo && dateInsideRange(workLogForm.date, report.value.remoteFrom, report.value.remoteTo))
+  );
+});
+const workLogTypeOptions = computed(() => [...new Set([...workLogTypes, ...state.entryDefaults.workCategories].filter(Boolean))]);
+const generatedWorkLogSummary = computed(() =>
+  autoWorkLogSummary({
+    workType: workLogForm.taskCategory,
+    clientSite: workLogForm.clientSite,
+    location: workLogForm.location,
+    notes: workLogForm.actions,
+  })
+);
 const savedMileageLocations = computed(() => state.preferences.mileageLocations);
 const selectedMileageDrafts = computed(() => state.mileageDrafts.filter((draft) => draft.selected));
 
@@ -469,6 +509,8 @@ function blankEntryDefaults() {
     vendorCategories: {},
     vendorPaymentMethods: {},
     workCategories: [],
+    lastWorkHours: '8',
+    lastWorkStatus: 'Draft',
     lastMileageRoute: null,
   };
 }
@@ -821,6 +863,8 @@ function normalizeEntryDefaults(defaults) {
     vendorCategories: source.vendorCategories && typeof source.vendorCategories === 'object' ? source.vendorCategories : {},
     vendorPaymentMethods: source.vendorPaymentMethods && typeof source.vendorPaymentMethods === 'object' ? source.vendorPaymentMethods : {},
     workCategories: Array.isArray(source.workCategories) ? source.workCategories.slice(0, 12) : [],
+    lastWorkHours: source.lastWorkHours || blank.lastWorkHours,
+    lastWorkStatus: source.lastWorkStatus || blank.lastWorkStatus,
     lastMileageRoute: source.lastMileageRoute || null,
   };
 }
@@ -889,6 +933,8 @@ function updateEntryDefaultsFromWorkLog(row) {
   if (row.clientSite) state.entryDefaults.clientName = row.clientSite;
   if (row.location) state.entryDefaults.siteName = row.location;
   state.entryDefaults.workCategories = rememberRecent(state.entryDefaults.workCategories, row.taskCategory);
+  if (row.hours) state.entryDefaults.lastWorkHours = String(row.hours);
+  if (row.status) state.entryDefaults.lastWorkStatus = row.status;
   saveEntryDefaults();
 }
 
@@ -929,20 +975,17 @@ function addDaysInput(value, days) {
 }
 
 function nextWeekdayInPeriod(afterDate = '') {
-  const today = currentDateInputValue();
-  let candidate = afterDate && isValidDateInput(afterDate) ? addDaysInput(afterDate, 1) : report.value.periodFrom || today;
-  if (isValidDateInput(report.value.periodFrom) && candidate < report.value.periodFrom) candidate = report.value.periodFrom;
-  for (let index = 0; index < 45; index += 1) {
-    if (dateInsideRange(candidate, report.value.periodFrom, report.value.periodTo) && dateIsWeekday(candidate)) return candidate;
-    candidate = addDaysInput(candidate, 1);
-  }
-  return today;
+  return nextAvailableWorkLogDate({
+    afterDate,
+    periodFrom: report.value.periodFrom,
+    periodTo: report.value.periodTo,
+    existingDates: data.value.workLogs.map((row) => row.date),
+    today: currentDateInputValue(),
+  });
 }
 
 function inferWorkCategoryForDate(date) {
-  if (dateInsideRange(date, report.value.onsiteFrom, report.value.onsiteTo) && report.value.onsiteFrom && report.value.onsiteTo) return 'Onsite work';
-  if (dateInsideRange(date, report.value.remoteFrom, report.value.remoteTo) && report.value.remoteFrom && report.value.remoteTo) return 'Remote work';
-  return state.entryDefaults.workCategories[0] || '';
+  return inferWorkTypeForDate(date, report.value, state.entryDefaults.workCategories[0]);
 }
 
 function suggestNextSequence(values) {
@@ -1005,15 +1048,20 @@ function seedMileageForm() {
 
 function seedWorkLogForm(afterDate = '') {
   const nextDate = nextWeekdayInPeriod(afterDate || data.value.workLogs[data.value.workLogs.length - 1]?.date || '');
+  const workType = inferWorkCategoryForDate(nextDate);
+  const clientSite = meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName;
+  const hours = state.entryDefaults.lastWorkHours || '8';
   Object.assign(workLogForm, {
     date: nextDate,
-    clientSite: meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName,
-    location: meta.value.siteName || meta.value.siteAddress || state.entryDefaults.siteName || state.entryDefaults.siteAddress,
-    taskCategory: inferWorkCategoryForDate(nextDate),
-    hours: '8',
+    clientSite,
+    location: workLogLocationForType(workType, meta.value, state.entryDefaults),
+    taskCategory: workType,
+    hours,
+    hourPreset: workLogHourOptions.includes(hours) ? hours : 'Custom',
     summary: '',
     actions: '',
-    status: 'Draft',
+    status: state.entryDefaults.lastWorkStatus || 'Draft',
+    showDetails: false,
   });
 }
 
@@ -2772,7 +2820,26 @@ function selectMileageRoute(row) {
   }
 }
 
-async function addWorkLog() {
+function handleWorkLogDateChange() {
+  workLogForm.taskCategory = inferWorkCategoryForDate(workLogForm.date);
+  handleWorkLogTypeChange();
+}
+
+function handleWorkLogTypeChange() {
+  workLogForm.location = workLogLocationForType(workLogForm.taskCategory, meta.value, state.entryDefaults);
+}
+
+function handleWorkLogHourPresetChange() {
+  if (workLogForm.hourPreset !== 'Custom') workLogForm.hours = workLogForm.hourPreset;
+}
+
+function skipWorkLogDay() {
+  const nextDate = nextWeekdayInPeriod(workLogForm.date);
+  workLogForm.date = nextDate;
+  handleWorkLogDateChange();
+}
+
+function buildWorkLogRow() {
   const row = {
     id: newId(),
     date: workLogForm.date,
@@ -2780,23 +2847,48 @@ async function addWorkLog() {
     location: workLogForm.location.trim(),
     taskCategory: workLogForm.taskCategory.trim(),
     hours: Number(workLogForm.hours || 0),
-    summary: workLogForm.summary.trim(),
-    actions: workLogForm.actions.trim(),
+    summary: workLogForm.summary.trim() || generatedWorkLogSummary.value,
+    actions: workLogForm.showDetails ? workLogForm.actions.trim() : '',
     status: workLogForm.status.trim(),
   };
+  return row;
+}
+
+async function addWorkLog(options = {}) {
+  const row = buildWorkLogRow();
+  if (workLogDateHasExisting.value && !options.allowDuplicate && !options.replaceExisting) {
+    state.error = 'This date already has a work log. Add another entry or replace the existing one.';
+    return;
+  }
+  if (options.replaceExisting) {
+    data.value.workLogs = data.value.workLogs.filter((item) => item.date !== row.date);
+  }
+  state.error = '';
   data.value.workLogs.push(row);
   updateEntryDefaultsFromWorkLog(row);
   seedWorkLogForm(row.date);
   await saveCurrentProject();
 }
 
-function datesForWeekdayRange(from, to) {
-  if (!isValidDateInput(from) || !isValidDateInput(to)) return [];
-  const dates = [];
-  for (let cursor = from; cursor <= to; cursor = addDaysInput(cursor, 1)) {
-    if (dateIsWeekday(cursor)) dates.push(cursor);
+async function addSameAsPreviousWorkLog() {
+  const previous = data.value.workLogs[data.value.workLogs.length - 1];
+  if (!previous) {
+    await addWorkLog();
+    return;
   }
-  return dates;
+  const nextDate = nextWeekdayInPeriod(previous.date);
+  Object.assign(workLogForm, {
+    date: nextDate,
+    clientSite: previous.clientSite || workLogForm.clientSite,
+    location: previous.location || workLogForm.location,
+    taskCategory: previous.taskCategory || inferWorkCategoryForDate(nextDate),
+    hours: String(previous.hours || workLogForm.hours || 8),
+    hourPreset: workLogHourOptions.includes(String(previous.hours || '')) ? String(previous.hours) : 'Custom',
+    summary: '',
+    actions: previous.actions || '',
+    status: previous.status || workLogForm.status || 'Draft',
+  });
+  await addWorkLog();
 }
 
 async function generateWorkLogDrafts() {
@@ -2825,12 +2917,17 @@ async function generateWorkLogDrafts() {
         id: newId(),
         date,
         clientSite: meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName,
-        location: meta.value.siteName || meta.value.siteAddress || state.entryDefaults.siteName || state.entryDefaults.siteAddress,
+        location: workLogLocationForType(group.taskCategory, meta.value, state.entryDefaults),
         taskCategory: group.taskCategory,
         hours: 8,
-        summary: group.summary,
+        summary: autoWorkLogSummary({
+          workType: group.taskCategory,
+          clientSite: meta.value.clientName || meta.value.siteName || state.entryDefaults.clientName,
+          location: workLogLocationForType(group.taskCategory, meta.value, state.entryDefaults),
+          notes: group.summary,
+        }),
         actions: '',
-        status: 'Draft',
+        status: 'Needs review',
       });
     });
   });
@@ -5288,18 +5385,64 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="state.currentProject && state.tab === 'worklog'" class="workbook-view">
-      <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addWorkLog">
-        <h2>Add work log</h2>
-        <button class="secondary" type="button" @click="generateWorkLogDrafts">Generate work log drafts</button>
-        <input v-model="workLogForm.date" type="date" required @change="workLogForm.taskCategory = inferWorkCategoryForDate(workLogForm.date)" />
-        <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
-        <input v-model="workLogForm.location" placeholder="Location" />
-        <input v-model="workLogForm.taskCategory" placeholder="Task category" />
-        <input v-model="workLogForm.hours" type="number" min="0" step="0.25" placeholder="Hours" required />
-        <textarea v-model="workLogForm.summary" placeholder="Work summary"></textarea>
-        <textarea v-model="workLogForm.actions" placeholder="Key findings / actions"></textarea>
-        <input v-model="workLogForm.status" placeholder="Status" />
-        <button type="submit">Add work log</button>
+      <form class="quick-worklog-card" spellcheck="true" autocapitalize="sentences" @submit.prevent="addWorkLog">
+        <div class="sheet-title-row">
+          <span>Daily Quick Add</span>
+          <strong>{{ generatedWorkLogSummary }}</strong>
+        </div>
+        <div class="quick-worklog-grid">
+          <label>
+            <span>Date</span>
+            <input v-model="workLogForm.date" type="date" required @change="handleWorkLogDateChange" />
+          </label>
+          <label>
+            <span>Work type</span>
+            <select v-model="workLogForm.taskCategory" @change="handleWorkLogTypeChange">
+              <option v-for="type in workLogTypeOptions" :key="type" :value="type">{{ type }}</option>
+            </select>
+          </label>
+          <label>
+            <span>Hours</span>
+            <select v-model="workLogForm.hourPreset" @change="handleWorkLogHourPresetChange">
+              <option v-for="hours in workLogHourOptions" :key="hours" :value="hours">{{ hours }}</option>
+            </select>
+          </label>
+          <label v-if="workLogForm.hourPreset === 'Custom'">
+            <span>Custom hours</span>
+            <input v-model="workLogForm.hours" type="number" min="0" step="0.25" required />
+          </label>
+          <label>
+            <span>Status</span>
+            <select v-model="workLogForm.status">
+              <option v-for="status in workLogStatuses" :key="status" :value="status">{{ status }}</option>
+            </select>
+          </label>
+        </div>
+        <div class="quick-worklog-meta">
+          <input v-model="workLogForm.clientSite" placeholder="Client / Site" required />
+          <input v-model="workLogForm.location" placeholder="Location" />
+        </div>
+        <p v-if="workLogDateOutsideLaborRanges" class="save-confirmation pending">
+          This date is outside the onsite/remote statement ranges. Review the work type before saving.
+        </p>
+        <div v-if="workLogDateHasExisting" class="save-confirmation pending">
+          Already logged for this date.
+          <button class="link-button" type="button" @click="addWorkLog({ allowDuplicate: true })">Add another entry</button>
+          <button class="link-button" type="button" @click="addWorkLog({ replaceExisting: true })">Replace existing</button>
+        </div>
+        <button class="secondary" type="button" @click="workLogForm.showDetails = !workLogForm.showDetails">
+          {{ workLogForm.showDetails ? 'Hide notes' : 'Add note / more details' }}
+        </button>
+        <div v-if="workLogForm.showDetails" class="quick-worklog-details">
+          <textarea v-model="workLogForm.actions" placeholder="Optional notes, findings, or actions"></textarea>
+          <textarea v-model="workLogForm.summary" placeholder="Optional manual summary override"></textarea>
+        </div>
+        <div class="quick-worklog-actions">
+          <button type="submit">Add and next day</button>
+          <button class="secondary" type="button" @click="addSameAsPreviousWorkLog">Add same as previous</button>
+          <button class="secondary" type="button" @click="skipWorkLogDay">Skip day</button>
+          <button class="secondary" type="button" @click="generateWorkLogDrafts">Generate weekdays from statement dates</button>
+        </div>
       </form>
 
       <div class="sheet-panel">

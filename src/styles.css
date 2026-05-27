@@ -1412,6 +1412,66 @@ h3 {
   align-content: start;
 }
 
+.quick-worklog-card {
+  gap: 14px;
+}
+
+.quick-worklog-card .sheet-title-row {
+  margin-bottom: 0;
+}
+
+.quick-worklog-card .sheet-title-row strong {
+  max-width: 58%;
+  color: #4b5a60;
+  font-size: 14px;
+  text-align: right;
+}
+
+.quick-worklog-grid,
+.quick-worklog-meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quick-worklog-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-worklog-card label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.quick-worklog-card label span {
+  color: #4b5a60;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.quick-worklog-details {
+  display: grid;
+  gap: 10px;
+}
+
+.quick-worklog-actions {
+  display: grid;
+  grid-template-columns: 1.1fr repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.link-button {
+  min-height: 0;
+  margin-left: 10px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #07553d;
+  text-decoration: underline;
+}
+
 .address-field {
   position: relative;
 }
@@ -1805,8 +1865,16 @@ h3 {
   .statement-grid,
   .workbook-view,
   .mileage-layout,
-  .statement-meta {
+  .statement-meta,
+  .quick-worklog-grid,
+  .quick-worklog-meta,
+  .quick-worklog-actions {
     grid-template-columns: 1fr;
+  }
+
+  .quick-worklog-card .sheet-title-row strong {
+    max-width: 100%;
+    text-align: left;
   }
 
   .print-toolbar,
