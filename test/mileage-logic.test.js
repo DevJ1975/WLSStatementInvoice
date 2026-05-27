@@ -37,3 +37,19 @@ test('createRoundTripRows creates outbound and reversed return rows', async () =
   assert.deepEqual(rows[1].routeGeometry, [{ lat: 2, lng: 2 }, { lat: 1, lng: 1 }]);
   assert.equal(rows[1].purpose, 'Return from site');
 });
+
+test('routeThumbnailPolyline normalizes route points into an SVG polyline', async () => {
+  const { routeThumbnailPolyline } = await import('../src/mileageLogic.mjs');
+  const polyline = routeThumbnailPolyline(
+    [
+      { lat: 34, lng: -118 },
+      { lat: 35, lng: -117 },
+    ],
+    100,
+    50,
+    5
+  );
+
+  assert.equal(polyline, '5,45 95,5');
+  assert.equal(routeThumbnailPolyline([]), '');
+});

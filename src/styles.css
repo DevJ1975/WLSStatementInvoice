@@ -1507,8 +1507,38 @@ h3 {
 
 .gps-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 8px;
+}
+
+.route-thumbnail-button {
+  display: grid;
+  place-items: center;
+  width: 104px;
+  min-height: 48px;
+  border: 1px solid #c8d1d6;
+  border-radius: 6px;
+  padding: 3px;
+  background: linear-gradient(90deg, #eef2f4 1px, transparent 1px), linear-gradient(#eef2f4 1px, transparent 1px), white;
+  background-size: 24px 21px;
+  color: #846268;
+}
+
+.route-thumbnail-button svg {
+  width: 96px;
+  height: 42px;
+}
+
+.route-thumbnail-button polyline {
+  fill: none;
+  stroke: #846268;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 4;
+}
+
+.route-thumbnail-button circle {
+  fill: #4b5a60;
 }
 
 .saved-location-list,
@@ -1551,7 +1581,7 @@ h3 {
 }
 
 .mileage-table {
-  min-width: 1080px;
+  min-width: 1180px;
 }
 
 .sheet-table tr.selected td {

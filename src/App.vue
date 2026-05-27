@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { createRoundTripRows, reverseRouteGeometry, workLogDatesMissingMileage } from './mileageLogic.mjs';
+import { createRoundTripRows, reverseRouteGeometry, routeThumbnailPolyline, workLogDatesMissingMileage } from './mileageLogic.mjs';
 
 const archiveStorageKey = 'wls-project-archive-fallback-v1';
 const archiveBackupStorageKey = 'wls-project-archive-backups-v1';
@@ -168,6 +168,10 @@ const state = reactive({
     watchId: null,
     startedAt: null,
     elapsedSeconds: 0,
+    paused: false,
+    pausedAt: null,
+    pausedSeconds: 0,
+    pauseSegments: [],
     routePoints: [],
     lastAccuracy: null,
     error: '',
@@ -512,6 +516,8 @@ function normalizeMileageRow(row) {
     routeDistanceMiles: Number(row?.routeDistanceMiles || 0),
     distanceMiles: Number(row?.distanceMiles || row?.miles || 0),
     durationSeconds: Number(row?.durationSeconds || 0),
+    pausedSeconds: Number(row?.pausedSeconds || 0),
+    pauseSegments: Array.isArray(row?.pauseSegments) ? row.pauseSegments : [],
     startLocation: row?.startLocation || '',
     endLocation: row?.endLocation || '',
   };
@@ -2324,9 +2330,28 @@ function startGpsTimer() {
   clearInterval(gpsTimer);
   gpsTimer = setInterval(() => {
     if (state.gps.active && state.gps.startedAt) {
-      state.gps.elapsedSeconds = Math.floor((Date.now() - state.gps.startedAt) / 1000);
+      state.gps.elapsedSeconds = currentGpsElapsedSeconds();
     }
   }, 1000);
+}
+
+function currentGpsElapsedSeconds(now = Date.now()) {
+  if (!state.gps.startedAt) return 0;
+  const activePauseSeconds = state.gps.paused && state.gps.pausedAt ? Math.floor((now - state.gps.pausedAt) / 1000) : 0;
+  return Math.max(0, Math.floor((now - state.gps.startedAt) / 1000) - state.gps.pausedSeconds - activePauseSeconds);
+}
+
+function finalizeGpsPause(now = Date.now()) {
+  if (!state.gps.paused || !state.gps.pausedAt) return;
+  const durationSeconds = Math.max(0, Math.floor((now - state.gps.pausedAt) / 1000));
+  state.gps.pauseSegments.push({
+    startedAt: new Date(state.gps.pausedAt).toISOString(),
+    endedAt: new Date(now).toISOString(),
+    durationSeconds,
+  });
+  state.gps.pausedSeconds += durationSeconds;
+  state.gps.paused = false;
+  state.gps.pausedAt = null;
 }
 
 function stopGpsTripWatcher() {
@@ -2337,6 +2362,8 @@ function stopGpsTripWatcher() {
   gpsTimer = null;
   state.gps.watchId = null;
   state.gps.active = false;
+  state.gps.paused = false;
+  state.gps.pausedAt = null;
 }
 
 function startGpsTrip() {
@@ -2351,6 +2378,10 @@ function startGpsTrip() {
   state.gps.error = 'Waiting for GPS signal...';
   state.gps.startedAt = Date.now();
   state.gps.elapsedSeconds = 0;
+  state.gps.paused = false;
+  state.gps.pausedAt = null;
+  state.gps.pausedSeconds = 0;
+  state.gps.pauseSegments = [];
   state.gps.active = true;
   startGpsTimer();
 
@@ -2362,6 +2393,7 @@ function startGpsTrip() {
 }
 
 function recordGpsPosition(position) {
+  if (state.gps.paused) return;
   const { latitude, longitude, accuracy } = position.coords || {};
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     state.gps.error = 'GPS returned an empty location. Keep the app open and try again.';
@@ -2389,6 +2421,21 @@ function recordGpsPosition(position) {
   }
 }
 
+function pauseGpsTrip() {
+  if (!state.gps.active || state.gps.paused) return;
+  state.gps.paused = true;
+  state.gps.pausedAt = Date.now();
+  state.gps.elapsedSeconds = currentGpsElapsedSeconds();
+  state.gps.error = 'GPS trip paused.';
+}
+
+function resumeGpsTrip() {
+  if (!state.gps.active || !state.gps.paused) return;
+  finalizeGpsPause();
+  state.gps.elapsedSeconds = currentGpsElapsedSeconds();
+  state.gps.error = '';
+}
+
 function handleGpsError(error) {
   const messages = {
     1: 'Location permission was denied. Manual mileage entry is still available.',
@@ -2402,6 +2449,8 @@ function handleGpsError(error) {
 }
 
 async function stopGpsTrip() {
+  finalizeGpsPause();
+  const durationSeconds = currentGpsElapsedSeconds();
   stopGpsTripWatcher();
   const points = state.gps.routePoints.map(normalizeRoutePoint);
   const distanceMiles = liveGpsMiles.value;
@@ -2425,7 +2474,9 @@ async function stopGpsTrip() {
     rate: Number(mileageForm.rate || 0.725),
     routePoints: points,
     distanceMiles,
-    durationSeconds: state.gps.elapsedSeconds,
+    durationSeconds,
+    pausedSeconds: state.gps.pausedSeconds,
+    pauseSegments: [...state.gps.pauseSegments],
     startLocation: pointLabel(firstPoint),
     endLocation: pointLabel(lastPoint),
   };
@@ -2434,6 +2485,8 @@ async function stopGpsTrip() {
   state.gps.selectedMileageId = row.id;
   state.gps.routePoints = [];
   state.gps.error = '';
+  state.gps.pausedSeconds = 0;
+  state.gps.pauseSegments = [];
   updateEntryDefaultsFromMileage(row);
   await saveCurrentProject();
 }
@@ -2443,6 +2496,10 @@ function discardGpsTrip() {
   state.gps.routePoints = [];
   state.gps.startedAt = null;
   state.gps.elapsedSeconds = 0;
+  state.gps.paused = false;
+  state.gps.pausedAt = null;
+  state.gps.pausedSeconds = 0;
+  state.gps.pauseSegments = [];
   state.gps.lastAccuracy = null;
   state.gps.error = '';
 }
@@ -4797,10 +4854,14 @@ onBeforeUnmount(() => {
             <span><strong>{{ formatDuration(liveGpsDuration) }}</strong> elapsed</span>
             <span><strong>{{ state.gps.routePoints.length }}</strong> points</span>
             <span><strong>{{ state.gps.lastAccuracy ? `${state.gps.lastAccuracy}m` : '-' }}</strong> accuracy</span>
+            <span><strong>{{ state.gps.paused ? 'Paused' : state.gps.active ? 'Tracking' : 'Ready' }}</strong> status</span>
+            <span><strong>{{ formatDuration(state.gps.pausedSeconds) }}</strong> paused</span>
           </div>
           <p v-if="state.gps.error" class="status-message gps-message">{{ state.gps.error }}</p>
           <div class="gps-actions">
             <button type="button" :disabled="state.gps.active" @click="startGpsTrip">Start Trip</button>
+            <button class="secondary" type="button" :disabled="!state.gps.active || state.gps.paused" @click="pauseGpsTrip">Pause</button>
+            <button class="secondary" type="button" :disabled="!state.gps.active || !state.gps.paused" @click="resumeGpsTrip">Resume</button>
             <button class="secondary" type="button" :disabled="!state.gps.active" @click="stopGpsTrip">Stop & Save</button>
             <button class="secondary" type="button" :disabled="!state.gps.active && !state.gps.routePoints.length" @click="discardGpsTrip">Discard</button>
           </div>
@@ -4811,10 +4872,19 @@ onBeforeUnmount(() => {
         <div class="mileage-layout">
           <div class="table-scroll">
             <table class="sheet-table mileage-table">
-              <thead><tr><th>Type</th><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th><th></th></tr></thead>
+              <thead><tr><th>Type</th><th>Route</th><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th>Miles</th><th>$ Per Mile</th><th>Total</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="row in data.mileageRows" :key="row.id" :class="{ selected: row.id === state.gps.selectedMileageId }">
                   <td>{{ row.trackingMode === 'gps' ? 'GPS' : row.calculationMode === 'address-route' ? 'Auto' : 'Manual' }}</td>
+                  <td>
+                    <button v-if="rowRoutePoints(row).length" class="route-thumbnail-button" type="button" title="Show route map" @click="selectMileageRoute(row)">
+                      <svg viewBox="0 0 96 42" aria-hidden="true">
+                        <polyline :points="routeThumbnailPolyline(rowRoutePoints(row))" />
+                        <circle v-if="rowRoutePoints(row).length" :cx="routeThumbnailPolyline(rowRoutePoints(row)).split(' ')[0]?.split(',')[0]" :cy="routeThumbnailPolyline(rowRoutePoints(row)).split(' ')[0]?.split(',')[1]" r="2.8" />
+                      </svg>
+                    </button>
+                    <span v-else class="muted">-</span>
+                  </td>
                   <td><input class="table-input" v-model="row.date" type="date" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td><input class="table-input" v-model="row.from" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
                   <td><input class="table-input" v-model="row.to" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
@@ -4828,7 +4898,7 @@ onBeforeUnmount(() => {
                   </td>
                 </tr>
               </tbody>
-              <tfoot><tr><td colspan="5">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td></td><td>{{ money.format(mileageTotal) }}</td><td></td></tr></tfoot>
+              <tfoot><tr><td colspan="6">TOTALS</td><td>{{ number.format(totalMiles) }}</td><td></td><td>{{ money.format(mileageTotal) }}</td><td></td></tr></tfoot>
             </table>
           </div>
           <aside class="summary-box">
