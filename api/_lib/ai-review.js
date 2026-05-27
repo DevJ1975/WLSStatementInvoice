@@ -181,7 +181,7 @@ function deterministicPreflight(project, options = {}) {
 
   const totalsReview = {
     ...calculateProjectTotals(data),
-    status: critical.length ? 'blocked' : 'calculated',
+    status: critical.length ? 'needs_attention' : 'calculated',
   };
 
   return {
@@ -272,9 +272,9 @@ function aiSystemPrompt() {
 
 function preflightUserPrompt(compactProject, deterministicReview) {
   return JSON.stringify({
-    task: 'Review this WLS accounting package for errors before download/email. Return JSON only with keys critical, warnings, suggestions, summary.',
+    task: 'Review this WLS accounting package for errors before download/email. Return JSON only with keys critical, warnings, suggestions, summary. Julie is advisory and should not say that file viewing, printing, or downloads are blocked.',
     expectedShape: {
-      critical: ['Only issues that should block export/email.'],
+      critical: ['Serious issues the user should review before emailing, but not file-action blockers.'],
       warnings: ['Issues user can acknowledge if intentional.'],
       suggestions: ['Helpful cleanup ideas.'],
       summary: 'One short plain-English review summary.',

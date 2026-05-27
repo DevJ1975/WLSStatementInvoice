@@ -1540,7 +1540,7 @@ function aiIssueText(issue) {
 function acknowledgeAiWarnings() {
   state.ai.warningAcknowledged = true;
   state.ai.error = '';
-  state.saveNotice = 'Julie warnings acknowledged. You can continue the export when ready.';
+  state.saveNotice = 'Julie warnings acknowledged.';
 }
 
 function openAiChat() {
@@ -1598,28 +1598,27 @@ async function runDashboardAiReview() {
   if (!review) return;
   if (review.status === 'pass') state.saveNotice = 'Julie review passed. This package appears ready.';
   if (review.status === 'warning') state.saveNotice = 'Julie review found warnings to review.';
-  if (review.status === 'fail') state.saveNotice = 'Julie review found critical issues to fix.';
+  if (review.status === 'fail') state.saveNotice = 'Julie found items that need attention.';
 }
 
 async function ensureAiReadyForExport(exportType) {
   const review = await runAiPreflight(exportType);
   if (!review) {
-    state.error = state.ai.error || 'Julie review could not be completed.';
-    return false;
+    state.error = '';
+    state.saveNotice = state.ai.error
+      ? `Julie review could not be completed: ${state.ai.error}. Continuing with your file.`
+      : 'Julie review could not be completed. Continuing with your file.';
+    return true;
   }
   if (review.status === 'fail') {
-    state.error = 'Julie review found critical issues. Fix them before exporting or printing.';
-    state.tab = 'dashboard';
-    await nextTick();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    return false;
+    state.error = '';
+    state.saveNotice = 'Julie found items that need attention. Continuing with your file.';
+    return true;
   }
   if (review.status === 'warning' && !state.ai.warningAcknowledged) {
-    state.error = 'Julie review found warnings. Review and acknowledge them before continuing.';
-    state.tab = 'dashboard';
-    await nextTick();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    return false;
+    state.error = '';
+    state.saveNotice = 'Julie found warnings and suggestions. Continuing with your file.';
+    return true;
   }
   state.error = '';
   return true;
@@ -5121,10 +5120,10 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="state.ai.error" class="status-message gps-message">{{ state.ai.error }}</p>
         <p v-else-if="state.ai.lastReview?.summary" class="muted">{{ state.ai.lastReview.summary }}</p>
-        <p v-else class="muted">Run Julie review before downloading, printing, or preparing files to email.</p>
+        <p v-else class="muted">Run Julie review to see warnings and suggestions before downloading, printing, or preparing files to email.</p>
         <div v-if="state.ai.lastReview" class="ai-review-grid">
           <section>
-            <h3>Critical</h3>
+            <h3>Needs attention</h3>
             <p v-if="!aiReviewCritical.length" class="muted">None found.</p>
             <ul v-else>
               <li v-for="(item, index) in aiReviewCritical" :key="`critical-${index}`">{{ aiIssueText(item) }}</li>
