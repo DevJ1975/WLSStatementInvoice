@@ -13,6 +13,7 @@ const {
   suggestNextSequence,
   weekdayCountInRange,
 } = require('../api/_lib/data');
+const { isProjectStatus } = require('../api/_lib/project-status');
 
 test('normalizeProjectData fills missing sections and preserves valid arrays', () => {
   const normalized = normalizeProjectData({
@@ -119,6 +120,13 @@ test('weekdayCountInRange counts weekdays inclusively and skips weekends', () =>
   assert.equal(weekdayCountInRange('2026-05-15', '2026-05-18'), 2);
   assert.equal(weekdayCountInRange('2026-05-16', '2026-05-16'), 0);
   assert.equal(weekdayCountInRange('2026-05-18', '2026-05-15'), 0);
+});
+
+test('project status validation accepts active archived and deleted', () => {
+  assert.equal(isProjectStatus('active'), true);
+  assert.equal(isProjectStatus('archived'), true);
+  assert.equal(isProjectStatus('deleted'), true);
+  assert.equal(isProjectStatus('purged'), false);
 });
 
 test('defaultEntryValues suggests next numbers and preserves device defaults', () => {

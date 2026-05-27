@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { deleteRowWithUndo, replaceRowsWithUndo, restoreUndoItems, visibleProjectsForArchive } from './crudLogic.mjs';
 import { createRoundTripRows, reverseRouteGeometry, routeThumbnailPolyline, workLogDatesMissingMileage } from './mileageLogic.mjs';
 import {
   autoWorkLogSummary,
@@ -129,6 +130,13 @@ const state = reactive({
   lastSaveStatus: 'Not saved yet',
   saveNotice: '',
   duplicateWarning: '',
+  undo: null,
+  archiveFilter: 'active',
+  editing: {
+    expenseId: '',
+    mileageId: '',
+    workLogId: '',
+  },
   receiptQueue: [],
   receiptOcrRunning: false,
   receiptUploading: false,
@@ -308,13 +316,14 @@ const routeMileageRows = computed(() => data.value.mileageRows.filter((row) => r
 const localProjectCount = computed(() => uniqueDeviceDrafts(deviceDraftProjects()).length);
 const dashboardStats = computed(() => {
   const projects = state.projects || [];
+  const billableProjects = projects.filter((project) => project.status !== 'deleted');
   return {
-    active: projects.filter((project) => project.status !== 'archived').length,
-    archived: projects.filter((project) => project.status === 'archived').length,
-    expenses: projects.reduce((sum, project) => sum + normalizeProject(project).data.expenseRows.reduce((rowSum, row) => rowSum + Number(row.amount || 0), 0), 0),
-    miles: projects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0), 0), 0),
-    mileage: projects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0) * Number(row.rate || 0), 0), 0),
-    hours: projects.reduce((sum, project) => sum + normalizeProject(project).data.workLogs.reduce((rowSum, row) => rowSum + Number(row.hours || 0), 0), 0),
+    active: billableProjects.filter((project) => project.status !== 'archived').length,
+    archived: billableProjects.filter((project) => project.status === 'archived').length,
+    expenses: billableProjects.reduce((sum, project) => sum + normalizeProject(project).data.expenseRows.reduce((rowSum, row) => rowSum + Number(row.amount || 0), 0), 0),
+    miles: billableProjects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0), 0), 0),
+    mileage: billableProjects.reduce((sum, project) => sum + normalizeProject(project).data.mileageRows.reduce((rowSum, row) => rowSum + Number(row.miles || 0) * Number(row.rate || 0), 0), 0),
+    hours: billableProjects.reduce((sum, project) => sum + normalizeProject(project).data.workLogs.reduce((rowSum, row) => rowSum + Number(row.hours || 0), 0), 0),
   };
 });
 const syncStatusText = computed(() => {
@@ -382,7 +391,7 @@ const compactMileageRows = computed(() =>
   }))
 );
 const workLogSummaryRows = computed(() => summarizeWorkLogs(data.value.workLogs));
-const workLogDateHasExisting = computed(() => data.value.workLogs.some((row) => row.date === workLogForm.date));
+const workLogDateHasExisting = computed(() => data.value.workLogs.some((row) => row.date === workLogForm.date && row.id !== state.editing.workLogId));
 const workLogDateOutsideLaborRanges = computed(() => {
   if (!workLogForm.date) return false;
   const hasLaborRanges = (report.value.onsiteFrom && report.value.onsiteTo) || (report.value.remoteFrom && report.value.remoteTo);
@@ -393,6 +402,7 @@ const workLogDateOutsideLaborRanges = computed(() => {
   );
 });
 const workLogTypeOptions = computed(() => [...new Set([...workLogTypes, ...state.entryDefaults.workCategories].filter(Boolean))]);
+const archiveProjects = computed(() => visibleProjectsForArchive(state.projects, state.archiveFilter));
 const generatedWorkLogSummary = computed(() =>
   autoWorkLogSummary({
     workType: workLogForm.taskCategory,
@@ -601,6 +611,7 @@ function normalizeProjectData(sourceData) {
 
 function normalizeProject(project) {
   const fallback = blankProject();
+  const status = ['active', 'archived', 'deleted'].includes(project?.status) ? project.status : 'active';
   return {
     ...fallback,
     ...project,
@@ -610,7 +621,7 @@ function normalizeProject(project) {
     createdBy: project?.createdBy || '',
     updatedBy: project?.updatedBy || '',
     title: project?.title || fallback.title,
-    status: project?.status || 'active',
+    status,
     data: normalizeProjectData(project?.data),
   };
 }
@@ -1236,10 +1247,11 @@ async function loadProjects() {
     state.projects = cloudProjects.map(normalizeProject);
     state.storage = 'mongodb';
 
-    if (!cloudProjects.length) {
+    const nonDeletedProjects = cloudProjects.filter((project) => project.status !== 'deleted');
+    if (!nonDeletedProjects.length) {
       await createProject('Untitled expense project');
     } else {
-      const preferred = cloudProjects.find((project) => project.id === localArchive.currentProjectId) || cloudProjects[0];
+      const preferred = nonDeletedProjects.find((project) => project.id === localArchive.currentProjectId) || nonDeletedProjects[0];
       await openProject(preferred.id);
     }
   } catch (error) {
@@ -1575,6 +1587,47 @@ function downloadBlobFile(fileName, blob) {
   link.download = fileName;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function clearCrudUndo() {
+  state.undo = null;
+}
+
+function setCrudUndo(undo, fallbackLabel = 'Change can be undone.') {
+  state.undo = undo ? { ...undo, label: undo.label || fallbackLabel } : null;
+}
+
+async function undoLastCrudAction() {
+  if (!state.undo || !state.currentProject) return;
+  const undo = state.undo;
+  state.currentProject.data = normalizeProjectData(restoreUndoItems(data.value, undo));
+  refreshReceiptQueue();
+  if (undo.selectedMileageId) state.gps.selectedMileageId = undo.selectedMileageId;
+  state.undo = null;
+  await saveCurrentProject();
+}
+
+function editingLabel(type) {
+  const id = state.editing[`${type}Id`];
+  if (!id) return '';
+  const collections = { expense: data.value.expenseRows, mileage: data.value.mileageRows, workLog: data.value.workLogs };
+  const index = (collections[type] || []).findIndex((row) => row.id === id);
+  return index >= 0 ? `Editing row #${index + 1}` : 'Editing row';
+}
+
+function cancelExpenseEdit() {
+  state.editing.expenseId = '';
+  Object.assign(expenseForm, { date: currentDateInputValue(), vendor: '', description: '', category: 'Hotel', amount: '' });
+}
+
+function cancelMileageEdit() {
+  state.editing.mileageId = '';
+  resetMileageForm();
+}
+
+function cancelWorkLogEdit() {
+  state.editing.workLogId = '';
+  seedWorkLogForm();
 }
 
 function exportJsonBackup() {
@@ -2162,21 +2215,16 @@ async function restoreProject(project) {
 
 async function deleteProject(project) {
   const title = projectTitle(project);
-  if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return;
-
-  if (state.storage === 'mongodb' && !isDeviceDraft(project)) {
-    await apiJson(`/api/projects/${project.id}`, { method: 'DELETE' });
-  }
-
-  state.projects = state.projects.filter((item) => item.id !== project.id);
+  if (!window.confirm(`Move "${title}" to Trash? You can restore it later.`)) return;
+  await patchProject(project, { status: 'deleted' });
   if (state.currentProject?.id === project.id) {
-    state.currentProject = state.projects[0] || null;
+    state.currentProject = state.projects.find((item) => item.status !== 'deleted') || null;
     if (state.currentProject && state.storage === 'mongodb') {
       await openProject(state.currentProject.id);
     }
   }
 
-  if (!state.projects.length) {
+  if (!state.projects.some((item) => item.status !== 'deleted')) {
     await createProject('Untitled expense project');
   } else {
     saveLocalArchive();
@@ -2220,25 +2268,52 @@ function warnDuplicateMileage(row) {
 
 async function addExpense() {
   const row = {
-    id: newId(),
+    id: state.editing.expenseId || newId(),
     date: expenseForm.date,
     vendor: expenseForm.vendor.trim(),
     description: expenseForm.description.trim(),
     category: expenseForm.category,
     amount: Number(expenseForm.amount || 0),
   };
-  if (warnDuplicateExpense(row) && !window.confirm('This looks like a duplicate expense. Add it anyway?')) return;
-  data.value.expenseRows.push(row);
+  clearCrudUndo();
+  if (!state.editing.expenseId && warnDuplicateExpense(row) && !window.confirm('This looks like a duplicate expense. Add it anyway?')) return;
+  if (state.editing.expenseId) {
+    const index = data.value.expenseRows.findIndex((item) => item.id === state.editing.expenseId);
+    if (index >= 0) data.value.expenseRows[index] = { ...data.value.expenseRows[index], ...row };
+    state.editing.expenseId = '';
+  } else {
+    data.value.expenseRows.push(row);
+  }
   state.duplicateWarning = '';
   updateEntryDefaultsFromExpense(row);
   Object.assign(expenseForm, { date: row.date || currentDateInputValue(), vendor: '', description: '', category: row.category || 'Hotel', amount: '' });
   await saveCurrentProject();
 }
 
+function editExpense(row) {
+  clearCrudUndo();
+  state.editing.expenseId = row.id;
+  Object.assign(expenseForm, {
+    date: row.date || currentDateInputValue(),
+    vendor: row.vendor || '',
+    description: row.description || '',
+    category: row.category || 'Hotel',
+    amount: row.amount || '',
+  });
+  nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+}
+
 async function addMileage() {
   const row = mileageRowFromForm();
-  if (warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
-  data.value.mileageRows.push(row);
+  clearCrudUndo();
+  if (!state.editing.mileageId && warnDuplicateMileage(row) && !window.confirm('This looks like duplicate mileage. Add it anyway?')) return;
+  if (state.editing.mileageId) {
+    const index = data.value.mileageRows.findIndex((item) => item.id === state.editing.mileageId);
+    if (index >= 0) data.value.mileageRows[index] = { ...data.value.mileageRows[index], ...row, id: state.editing.mileageId };
+    state.editing.mileageId = '';
+  } else {
+    data.value.mileageRows.push(row);
+  }
   state.duplicateWarning = '';
   updateEntryDefaultsFromMileage(row);
   resetMileageForm();
@@ -2247,31 +2322,59 @@ async function addMileage() {
 
 function mileageRowFromForm(overrides = {}) {
   const isAddressRoute = mileageForm.calculationMode === 'address-route' && mileageForm.routeGeometry.length;
+  const existing = state.editing.mileageId ? data.value.mileageRows.find((row) => row.id === state.editing.mileageId) : null;
+  const preserveGps = existing?.trackingMode === 'gps' && !isAddressRoute;
   return {
     id: newId(),
-    trackingMode: 'manual',
-    calculationMode: isAddressRoute ? 'address-route' : 'manual',
+    trackingMode: preserveGps ? 'gps' : 'manual',
+    calculationMode: isAddressRoute ? 'address-route' : preserveGps ? 'gps' : 'manual',
     date: mileageForm.date,
     from: mileageForm.from.trim(),
     to: mileageForm.to.trim(),
     purpose: mileageForm.purpose.trim(),
     miles: Number(mileageForm.miles || 0),
     rate: Number(mileageForm.rate || 0),
-    routePoints: [],
+    routePoints: preserveGps ? existing.routePoints || [] : [],
     routeGeometry: isAddressRoute ? [...mileageForm.routeGeometry] : [],
     routeDistanceMiles: isAddressRoute ? Number(mileageForm.routeDistanceMiles || mileageForm.miles || 0) : 0,
     fromPlace: isAddressRoute ? mileageForm.fromPlace : null,
     toPlace: isAddressRoute ? mileageForm.toPlace : null,
     distanceMiles: Number(mileageForm.miles || 0),
-    durationSeconds: isAddressRoute ? Number(mileageForm.routeDurationSeconds || 0) : 0,
-    startLocation: '',
-    endLocation: '',
+    durationSeconds: isAddressRoute ? Number(mileageForm.routeDurationSeconds || 0) : Number(existing?.durationSeconds || 0),
+    pausedSeconds: Number(existing?.pausedSeconds || 0),
+    pauseSegments: existing?.pauseSegments || [],
+    startLocation: existing?.startLocation || '',
+    endLocation: existing?.endLocation || '',
     ...overrides,
   };
 }
 
+function editMileage(row) {
+  clearCrudUndo();
+  state.editing.mileageId = row.id;
+  Object.assign(mileageForm, {
+    date: row.date || currentDateInputValue(),
+    from: row.from || '',
+    to: row.to || '',
+    purpose: row.purpose || '',
+    miles: row.miles || '',
+    rate: row.rate || state.entryDefaults.mileageRate || '0.725',
+    fromSavedLocationId: '',
+    toSavedLocationId: '',
+    fromPlace: row.fromPlace || null,
+    toPlace: row.toPlace || null,
+    routeGeometry: row.routeGeometry || [],
+    routeDistanceMiles: row.routeDistanceMiles || row.distanceMiles || row.miles || 0,
+    routeDurationSeconds: row.routeDurationSeconds || row.durationSeconds || 0,
+    calculationMode: row.calculationMode || 'manual',
+  });
+  if (rowRoutePoints(row).length) state.gps.selectedMileageId = row.id;
+  nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+}
+
 function resetMileageForm() {
   seedMileageForm();
+  state.editing.mileageId = '';
   state.places.fromSuggestions = [];
   state.places.toSuggestions = [];
 }
@@ -2480,6 +2583,7 @@ async function addRoundTripMileage() {
       row.routeGeometry = row.from === outbound.from ? [...outbound.routeGeometry] : reverseRouteGeometry(outbound.routeGeometry);
     }
   });
+  clearCrudUndo();
   data.value.mileageRows.push(...rows);
   state.duplicateWarning = '';
   updateEntryDefaultsFromMileage(rows[0]);
@@ -2551,6 +2655,7 @@ async function saveSelectedMileageDrafts() {
     state.places.error = 'Select at least one mileage draft to save.';
     return;
   }
+  clearCrudUndo();
   data.value.mileageRows.push(...rows);
   updateEntryDefaultsFromMileage(rows[rows.length - 1]);
   state.mileageDrafts = [];
@@ -2791,6 +2896,7 @@ async function stopGpsTrip() {
     endLocation: pointLabel(lastPoint),
   };
 
+  clearCrudUndo();
   data.value.mileageRows.push(row);
   state.gps.selectedMileageId = row.id;
   state.gps.routePoints = [];
@@ -2841,7 +2947,7 @@ function skipWorkLogDay() {
 
 function buildWorkLogRow() {
   const row = {
-    id: newId(),
+    id: state.editing.workLogId || newId(),
     date: workLogForm.date,
     clientSite: workLogForm.clientSite.trim(),
     location: workLogForm.location.trim(),
@@ -2856,18 +2962,45 @@ function buildWorkLogRow() {
 
 async function addWorkLog(options = {}) {
   const row = buildWorkLogRow();
-  if (workLogDateHasExisting.value && !options.allowDuplicate && !options.replaceExisting) {
+  const duplicateDate = data.value.workLogs.some((item) => item.date === row.date && item.id !== state.editing.workLogId);
+  if (duplicateDate && !options.allowDuplicate && !options.replaceExisting) {
     state.error = 'This date already has a work log. Add another entry or replace the existing one.';
     return;
   }
-  if (options.replaceExisting) {
-    data.value.workLogs = data.value.workLogs.filter((item) => item.date !== row.date);
+  clearCrudUndo();
+  if (state.editing.workLogId) {
+    const index = data.value.workLogs.findIndex((item) => item.id === state.editing.workLogId);
+    if (index >= 0) data.value.workLogs[index] = row;
+    state.editing.workLogId = '';
+  } else if (options.replaceExisting) {
+    const result = replaceRowsWithUndo(data.value, 'workLogs', (item) => item.date === row.date, [row], 'Work log replaced.');
+    state.currentProject.data = normalizeProjectData(result.data);
+    setCrudUndo(result.undo, 'Work log replaced.');
+  } else {
+    data.value.workLogs.push(row);
   }
   state.error = '';
-  data.value.workLogs.push(row);
   updateEntryDefaultsFromWorkLog(row);
   seedWorkLogForm(row.date);
   await saveCurrentProject();
+}
+
+function editWorkLog(row) {
+  clearCrudUndo();
+  state.editing.workLogId = row.id;
+  Object.assign(workLogForm, {
+    date: row.date || currentDateInputValue(),
+    clientSite: row.clientSite || '',
+    location: row.location || '',
+    taskCategory: row.taskCategory || inferWorkCategoryForDate(row.date),
+    hours: String(row.hours || 8),
+    hourPreset: workLogHourOptions.includes(String(row.hours || '')) ? String(row.hours) : 'Custom',
+    summary: row.summary || '',
+    actions: row.actions || '',
+    status: row.status || 'Draft',
+    showDetails: Boolean(row.actions || row.summary),
+  });
+  nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
 }
 
 async function addSameAsPreviousWorkLog() {
@@ -2937,6 +3070,7 @@ async function generateWorkLogDrafts() {
     return;
   }
 
+  clearCrudUndo();
   data.value.workLogs.push(...draftRows);
   draftRows.forEach(updateEntryDefaultsFromWorkLog);
   seedWorkLogForm(draftRows[draftRows.length - 1].date);
@@ -2945,10 +3079,35 @@ async function generateWorkLogDrafts() {
 }
 
 async function removeRow(collection, id) {
-  data.value[collection] = data.value[collection].filter((row) => row.id !== id);
-  if (collection === 'expenseRows') {
-    data.value.receipts = data.value.receipts.filter((receipt) => receipt.expenseId !== id);
-  }
+  const labels = {
+    expenseRows: 'Expense and linked receipt deleted.',
+    mileageRows: 'Mileage row deleted.',
+    workLogs: 'Work log deleted.',
+  };
+  const result = deleteRowWithUndo(data.value, collection, id, {
+    label: labels[collection] || 'Row deleted.',
+    selectedMileageId: collection === 'mileageRows' ? state.gps.selectedMileageId : '',
+  });
+  state.currentProject.data = normalizeProjectData(result.data);
+  refreshReceiptQueue();
+  setCrudUndo(result.undo, labels[collection]);
+  if (collection === 'mileageRows' && state.gps.selectedMileageId === id) state.gps.selectedMileageId = '';
+  if (collection === 'workLogs' && state.editing.workLogId === id) cancelWorkLogEdit();
+  if (collection === 'expenseRows' && state.editing.expenseId === id) cancelExpenseEdit();
+  if (collection === 'mileageRows' && state.editing.mileageId === id) cancelMileageEdit();
+  await saveCurrentProject();
+}
+
+async function removeReceipt(receipt) {
+  const linkedExpense = data.value.expenseRows.find((row) => row.id === receipt.expenseId || row.receiptId === receipt.id);
+  const deleteLinkedExpense = linkedExpense ? window.confirm('Delete this receipt and its linked expense row? Choose Cancel to delete only the receipt.') : false;
+  const result = deleteRowWithUndo(data.value, 'receipts', receipt.id, {
+    deleteLinkedExpense,
+    label: deleteLinkedExpense ? 'Receipt and linked expense deleted.' : 'Receipt deleted.',
+  });
+  state.currentProject.data = normalizeProjectData(result.data);
+  refreshReceiptQueue();
+  setCrudUndo(result.undo, deleteLinkedExpense ? 'Receipt and linked expense deleted.' : 'Receipt deleted.');
   await saveCurrentProject();
 }
 
@@ -3585,6 +3744,7 @@ async function saveReceiptDraft() {
     state.error = `Receipt needs ${receiptDraftMissingFields.value.join(', ')} before saving.`;
     return;
   }
+  clearCrudUndo();
   state.receiptUploading = true;
 
   try {
@@ -4682,6 +4842,11 @@ onBeforeUnmount(() => {
     <p v-if="state.error" class="status-message">{{ state.error }}</p>
     <p v-if="state.duplicateWarning" class="status-message">{{ state.duplicateWarning }}</p>
     <p v-if="state.saveNotice" class="save-toast" :class="{ failed: ['MongoDB save failed', 'Cloud save failed'].includes(state.lastSaveStatus) }">{{ state.saveNotice }}</p>
+    <div v-if="state.undo" class="undo-bar">
+      <span>{{ state.undo.label }}</span>
+      <button type="button" @click="undoLastCrudAction">Undo</button>
+      <button class="secondary" type="button" @click="clearCrudUndo">Dismiss</button>
+    </div>
     <p v-if="state.loading" class="loading">Loading...</p>
 
     <section v-else-if="state.tab === 'dashboard'" class="dashboard-view">
@@ -4947,14 +5112,19 @@ onBeforeUnmount(() => {
     <section v-else-if="state.tab === 'archive'" class="archive-view">
       <div class="archive-toolbar">
         <h2>Project archive</h2>
+        <div class="segmented-control">
+          <button type="button" :class="{ active: state.archiveFilter === 'active' }" @click="state.archiveFilter = 'active'">Projects</button>
+          <button type="button" :class="{ active: state.archiveFilter === 'trash' }" @click="state.archiveFilter = 'trash'">Trash</button>
+        </div>
         <button class="secondary" type="button" @click="exportJsonBackup">Export JSON Backup</button>
         <button class="secondary" type="button" @click="openBackupImport">Import Backup</button>
         <input ref="backupFileInput" class="hidden-file" type="file" accept="application/json" @change="importJsonBackup" />
         <button type="button" @click="createProject()">New project</button>
       </div>
       <p v-if="state.recoveryStatus" class="sync-status">{{ state.recoveryStatus }}</p>
+      <p v-if="state.archiveFilter === 'trash'" class="save-confirmation pending">Trash contains soft-deleted projects. Restore a project to edit it again.</p>
       <div class="archive-list">
-        <article v-for="project in state.projects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
+        <article v-for="project in archiveProjects" :key="project.id" :class="{ selected: state.currentProject?.id === project.id }">
           <div>
             <h3>{{ projectTitle(project) }}</h3>
             <p>{{ project.status }} <span v-if="project.periodFrom">| {{ project.periodFrom }} to {{ project.periodTo }}</span></p>
@@ -4966,11 +5136,11 @@ onBeforeUnmount(() => {
               #{{ member.accountNumber }} {{ member.name || 'Member' }}
             </option>
           </select>
-          <button class="secondary" type="button" @click="openProject(project.id)">Open</button>
-          <button class="secondary" type="button" @click="renameProject(project)">Rename</button>
-          <button v-if="project.status !== 'archived'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
-          <button v-else class="secondary" type="button" @click="restoreProject(project)">Restore</button>
-          <button class="danger" type="button" @click="deleteProject(project)">Delete</button>
+          <button v-if="project.status !== 'deleted'" class="secondary" type="button" @click="openProject(project.id)">Open</button>
+          <button v-if="project.status !== 'deleted'" class="secondary" type="button" @click="renameProject(project)">Rename</button>
+          <button v-if="project.status !== 'archived' && project.status !== 'deleted'" class="secondary" type="button" @click="archiveProject(project)">Archive</button>
+          <button v-if="project.status === 'archived' || project.status === 'deleted'" class="secondary" type="button" @click="restoreProject(project)">Restore</button>
+          <button v-if="project.status !== 'deleted'" class="danger" type="button" @click="deleteProject(project)">Delete</button>
         </article>
       </div>
     </section>
@@ -5085,7 +5255,11 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'expenses'" class="workbook-view">
       <div class="form-stack">
         <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addExpense">
-          <h2>Add expense line</h2>
+          <h2>{{ state.editing.expenseId ? 'Edit expense line' : 'Add expense line' }}</h2>
+          <p v-if="state.editing.expenseId" class="save-confirmation pending">
+            {{ editingLabel('expense') }}
+            <button class="link-button" type="button" @click="cancelExpenseEdit">Cancel edit</button>
+          </p>
           <input v-model="expenseForm.date" type="date" required />
           <input v-model="expenseForm.vendor" placeholder="Vendor" required />
           <input v-model="expenseForm.description" placeholder="Description" required />
@@ -5093,7 +5267,7 @@ onBeforeUnmount(() => {
             <option v-for="category in categories" :key="category" :value="category">{{ category }}</option>
           </select>
           <input v-model="expenseForm.amount" type="number" min="0" step="0.01" placeholder="Amount" required />
-          <button type="submit">Add expense</button>
+          <button type="submit">{{ state.editing.expenseId ? 'Save changes' : 'Add expense' }}</button>
         </form>
 
         <form class="receipt-capture" spellcheck="true" autocapitalize="sentences" @submit.prevent="saveReceiptDraft">
@@ -5144,7 +5318,10 @@ onBeforeUnmount(() => {
                 <td>{{ row.date }}</td><td>{{ row.vendor }}</td><td>{{ row.description }}</td>
                 <td v-for="category in categories" :key="category">{{ row.category === category ? money.format(row.amount) : '' }}</td>
                 <td>{{ money.format(row.amount) }}</td>
-                <td><button class="icon" type="button" @click="removeRow('expenseRows', row.id)">Delete</button></td>
+                <td>
+                  <button class="icon" type="button" @click="editExpense(row)">Edit</button>
+                  <button class="icon" type="button" @click="removeRow('expenseRows', row.id)">Delete</button>
+                </td>
               </tr>
             </tbody>
             <tfoot>
@@ -5167,6 +5344,7 @@ onBeforeUnmount(() => {
               <p>{{ receipt.date }} | {{ receipt.category }} | {{ money.format(receipt.amount || 0) }}</p>
               <p class="receipt-location">{{ receiptExpenseReference(receipt) }}</p>
               <p class="receipt-description">{{ receiptDescription(receipt) }}</p>
+              <button class="danger" type="button" @click="removeReceipt(receipt)">Delete receipt</button>
             </div>
           </article>
         </div>
@@ -5176,7 +5354,11 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'mileage'" class="workbook-view">
       <div class="form-stack">
         <form spellcheck="true" autocapitalize="sentences" @submit.prevent="addMileage">
-          <h2>Add mileage</h2>
+          <h2>{{ state.editing.mileageId ? 'Edit mileage' : 'Add mileage' }}</h2>
+          <p v-if="state.editing.mileageId" class="save-confirmation pending">
+            {{ editingLabel('mileage') }}
+            <button class="link-button" type="button" @click="cancelMileageEdit">Cancel edit</button>
+          </p>
           <div class="quick-route-actions">
             <button class="secondary" type="button" @click="applyQuickMileageRoute('home-to-site')">Home -> Site</button>
             <button class="secondary" type="button" @click="applyQuickMileageRoute('site-to-home')">Site -> Home</button>
@@ -5251,7 +5433,7 @@ onBeforeUnmount(() => {
           <p v-if="mileageForm.calculationMode === 'address-route'" class="muted">
             Driving mileage calculated from selected addresses. Miles remain editable.
           </p>
-          <button type="submit">Add mileage</button>
+          <button type="submit">{{ state.editing.mileageId ? 'Save changes' : 'Add mileage' }}</button>
         </form>
 
         <div class="gps-panel saved-locations-panel">
@@ -5341,15 +5523,16 @@ onBeforeUnmount(() => {
                     </button>
                     <span v-else class="muted">-</span>
                   </td>
-                  <td><input class="table-input" v-model="row.date" type="date" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.from" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.to" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input" v-model="row.purpose" spellcheck="true" autocapitalize="sentences" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input number-input" v-model.number="row.miles" type="number" min="0" step="0.01" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
-                  <td><input class="table-input number-input" v-model.number="row.rate" type="number" min="0" step="0.001" @input="scheduleAutoSave" @change="scheduleAutoSave" /></td>
+                  <td>{{ row.date }}</td>
+                  <td>{{ row.from }}</td>
+                  <td>{{ row.to }}</td>
+                  <td>{{ row.purpose }}</td>
+                  <td>{{ number.format(row.miles) }}</td>
+                  <td>${{ mileageRate.format(row.rate || 0) }}</td>
                   <td>{{ money.format(row.miles * row.rate) }}</td>
                   <td>
                     <button v-if="rowRoutePoints(row).length" class="icon" type="button" @click="selectMileageRoute(row)">Map</button>
+                    <button class="icon" type="button" @click="editMileage(row)">Edit</button>
                     <button class="icon" type="button" @click="removeRow('mileageRows', row.id)">Delete</button>
                   </td>
                 </tr>
@@ -5387,9 +5570,13 @@ onBeforeUnmount(() => {
     <section v-else-if="state.currentProject && state.tab === 'worklog'" class="workbook-view">
       <form class="quick-worklog-card" spellcheck="true" autocapitalize="sentences" @submit.prevent="addWorkLog">
         <div class="sheet-title-row">
-          <span>Daily Quick Add</span>
+          <span>{{ state.editing.workLogId ? 'Edit Work Log' : 'Daily Quick Add' }}</span>
           <strong>{{ generatedWorkLogSummary }}</strong>
         </div>
+        <p v-if="state.editing.workLogId" class="save-confirmation pending">
+          {{ editingLabel('workLog') }}
+          <button class="link-button" type="button" @click="cancelWorkLogEdit">Cancel edit</button>
+        </p>
         <div class="quick-worklog-grid">
           <label>
             <span>Date</span>
@@ -5438,10 +5625,10 @@ onBeforeUnmount(() => {
           <textarea v-model="workLogForm.summary" placeholder="Optional manual summary override"></textarea>
         </div>
         <div class="quick-worklog-actions">
-          <button type="submit">Add and next day</button>
-          <button class="secondary" type="button" @click="addSameAsPreviousWorkLog">Add same as previous</button>
-          <button class="secondary" type="button" @click="skipWorkLogDay">Skip day</button>
-          <button class="secondary" type="button" @click="generateWorkLogDrafts">Generate weekdays from statement dates</button>
+          <button type="submit">{{ state.editing.workLogId ? 'Save changes' : 'Add and next day' }}</button>
+          <button class="secondary" type="button" :disabled="Boolean(state.editing.workLogId)" @click="addSameAsPreviousWorkLog">Add same as previous</button>
+          <button class="secondary" type="button" :disabled="Boolean(state.editing.workLogId)" @click="skipWorkLogDay">Skip day</button>
+          <button class="secondary" type="button" :disabled="Boolean(state.editing.workLogId)" @click="generateWorkLogDrafts">Generate weekdays from statement dates</button>
         </div>
       </form>
 
@@ -5452,7 +5639,10 @@ onBeforeUnmount(() => {
             <tbody>
               <tr v-for="(row, index) in data.workLogs" :key="row.id">
                 <td>{{ index + 1 }}</td><td>{{ row.date }}</td><td>{{ row.clientSite }}</td><td>{{ row.location }}</td><td>{{ row.taskCategory }}</td><td>{{ row.hours }}</td><td>{{ row.summary }}</td><td>{{ row.actions }}</td><td>{{ row.status }}</td><td>{{ hasMileageForDate(row.date) ? 'Yes' : 'Missing' }}</td>
-                <td><button class="icon" type="button" @click="removeRow('workLogs', row.id)">Delete</button></td>
+                <td>
+                  <button class="icon" type="button" @click="editWorkLog(row)">Edit</button>
+                  <button class="icon" type="button" @click="removeRow('workLogs', row.id)">Delete</button>
+                </td>
               </tr>
             </tbody>
           </table>

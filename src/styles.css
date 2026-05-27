@@ -1244,6 +1244,49 @@ h3 {
   color: #7a2731;
 }
 
+.undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #b7d8cb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #eefbf5;
+  color: #07553d;
+  font-weight: 900;
+}
+
+.undo-bar span {
+  flex: 1 1 auto;
+}
+
+.undo-bar button {
+  min-height: 36px;
+  padding: 0 14px;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid #c8d1d6;
+  border-radius: 8px;
+  background: white;
+}
+
+.segmented-control button {
+  border: 0;
+  border-radius: 0;
+  background: white;
+  color: #4b5a60;
+}
+
+.segmented-control button.active {
+  background: #4b5a60;
+  color: white;
+}
+
 .statement-sheet,
 .sheet-panel {
   min-width: 0;
@@ -1925,9 +1968,14 @@ h3 {
   }
 
   .header-actions,
-  .archive-toolbar {
+  .archive-toolbar,
+  .undo-bar {
     align-items: stretch;
     width: 100%;
+  }
+
+  .undo-bar {
+    flex-direction: column;
   }
 
   .header-live {

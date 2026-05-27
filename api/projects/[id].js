@@ -2,6 +2,7 @@ const { deriveProjectTitle, normalizeProjectData, projectPayload, projectSummary
 const { getProjectsCollection, getReceiptsBucket, resetMongoCacheIfClosed, toObjectId } = require('../_lib/mongo');
 const { readBody, sendJson } = require('../_lib/http');
 const { memberById, normalizeProjectAssignment, projectAccessFilter, requireAuth, siteId } = require('../_lib/project-auth');
+const { isProjectStatus } = require('../_lib/project-status');
 
 function projectId(req) {
   const value = req.query?.id;
@@ -68,12 +69,11 @@ module.exports = async function handler(req, res) {
         sendJson(res, 404, { error: 'Project not found.' });
         return;
       }
-      const allowedStatus = ['active', 'archived'];
       const $set = { siteId, updatedAt: new Date(), updatedBy: member.id };
       if (typeof body.title === 'string') {
         $set.title = body.title.trim() || 'Untitled expense project';
       }
-      if (allowedStatus.includes(body.status)) {
+      if (isProjectStatus(body.status)) {
         $set.status = body.status;
       }
       if (Object.prototype.hasOwnProperty.call(body, 'memberId') && member.role === 'admin') {
